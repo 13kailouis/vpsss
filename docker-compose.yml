@@ -1,0 +1,62 @@
+services:
+  caption-scraper:
+    build: ./caption-scraper
+    image: wefluence/caption-scraper:latest
+    container_name: wefluence-caption-scraper
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - wefluence
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  matrix-scrapper:
+    build: ./matrix-scrapper
+    image: wefluence/matrix-scrapper:latest
+    container_name: wefluence-matrix-scrapper
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - wefluence
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: wefluence-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certbot/conf:/etc/letsencrypt
+      - ./nginx/certbot/www:/var/www/certbot
+    depends_on:
+      caption-scraper:
+        condition: service_started
+      matrix-scrapper:
+        condition: service_started
+    networks:
+      - wefluence
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  wefluence:
+    driver: bridge
