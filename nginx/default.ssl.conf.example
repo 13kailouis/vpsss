@@ -14,6 +14,10 @@
 
 limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/s;
 
+# Log format: catat IP, origin domain, endpoint, status, user-agent
+log_format scraper_log '$time_iso8601 | $remote_addr | origin="$http_origin" | '
+                       '"$request" | $status | ua="$http_user_agent"';
+
 upstream caption_scraper_backend {
     server caption-scraper:8000;
     keepalive 32;
@@ -69,6 +73,9 @@ server {
     add_header Strict-Transport-Security "max-age=31536000" always;
     add_header X-Content-Type-Options nosniff always;
 
+    access_log /var/log/nginx/scraper_access.log scraper_log;
+    error_log  /var/log/nginx/scraper_error.log warn;
+
     client_max_body_size 1m;
     gzip on;
     gzip_vary on;
@@ -123,6 +130,9 @@ server {
 
     add_header Strict-Transport-Security "max-age=31536000" always;
     add_header X-Content-Type-Options nosniff always;
+
+    access_log /var/log/nginx/scraper_access.log scraper_log;
+    error_log  /var/log/nginx/scraper_error.log warn;
 
     client_max_body_size 1m;
     gzip on;
