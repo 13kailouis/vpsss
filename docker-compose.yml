@@ -33,6 +33,25 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  ai-support:
+    build: ./wefluence-ai-support
+    image: wefluence/ai-support:latest
+    container_name: wefluence-ai-support
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - ./wefluence-ai-support/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - wefluence
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   nginx:
     image: nginx:1.27-alpine
     container_name: wefluence-nginx
@@ -48,6 +67,8 @@ services:
       caption-scraper:
         condition: service_started
       matrix-scrapper:
+        condition: service_started
+      ai-support:
         condition: service_started
     networks:
       - wefluence
