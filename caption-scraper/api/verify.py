@@ -861,8 +861,10 @@ def get_capcut_caption(url, expected_code=None):
 
 
 def get_facebook_caption(url, expected_code=None):
-    """Scrape caption from Facebook video/reel URL"""
-    # Googlebot gets best access to Facebook public content
+    """Scrape caption from Facebook video/reel/post URL.
+    Strategy: try multiple endpoints (canonical, m.facebook.com, watch, plugins/post.php)
+    with header rotation. Each response is first grepped for the expected code as the
+    highest-confidence signal (bypasses fragile JSON regex extraction)."""
     bot_headers = {
         'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -872,66 +874,156 @@ def get_facebook_caption(url, expected_code=None):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        'Sec-Ch-Ua-Mobile': '?0',
         'Sec-Fetch-Dest': 'document',
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'none',
         'Upgrade-Insecure-Requests': '1',
     }
+    iphone_headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
 
     def clean_meta(text):
-        return text.replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'").replace('&lt;', '<').replace('&gt;', '>')
+        return (text.replace('&amp;', '&').replace('&quot;', '"')
+                    .replace('&#39;', "'").replace('&#x27;', "'")
+                    .replace('&lt;', '<').replace('&gt;', '>'))
 
-    def try_extract(html):
-        # story_title embedded JSON
+    def grep_code(html, source):
+        """If expected_code is anywhere in raw HTML, return high-confidence snippet.
+        We deliberately do NOT strip HTML tags here: the code is often inside a meta
+        tag's content attribute, and tag-stripping would erase it along with the tag,
+        making a valid match look invalid downstream."""
+        if not expected_code:
+            return None, None
+        if expected_code.lower() in html.lower():
+            idx = html.lower().find(expected_code.lower())
+            start = max(0, idx - 200)
+            end = min(len(html), idx + len(expected_code) + 200)
+            snip = html[start:end]
+            snip = re.sub(r'\s+', ' ', snip).strip()
+            return f"...{snip}...", source
+        return None, None
+
+    def try_extract(html, src_prefix="Facebook"):
+        # 0. Highest-confidence: exact code grep on raw HTML (bypasses regex fragility)
+        cap, src = grep_code(html, f"{src_prefix}:HTML-Grepped")
+        if cap:
+            return cap, src
+
+        # 1. story_title JSON
         m = re.search(r'"story_title"\s*:\s*\{"text"\s*:\s*"([^"]+)"', html)
         if m:
-            return m.group(1), "Facebook:StoryTitle"
-        # message JSON field
-        m = re.search(r'"message"\s*:\s*\{"text"\s*:\s*"([^"]{10,})"', html)
-        if m:
-            return m.group(1), "Facebook:Message"
-        # og:description
+            return m.group(1), f"{src_prefix}:StoryTitle"
+
+        # 2. message JSON field — collect ALL matches and pick the most descriptive one.
+        # The original regex took only the first match, which on the reel page often
+        # captures comments or related-post text instead of the actual reel caption.
+        msgs = re.findall(r'"message"\s*:\s*\{"text"\s*:\s*"([^"]{10,})"', html)
+        if msgs:
+            # Prefer the message that contains the expected code
+            if expected_code:
+                for msg in msgs:
+                    if expected_code.lower() in msg.lower():
+                        return msg, f"{src_prefix}:Message-CodeMatch"
+            # Otherwise the longest non-generic message
+            generic = ['log in', 'see posts', 'see more', 'lihat postingan']
+            non_generic = [m for m in msgs if not any(g in m.lower() for g in generic)]
+            if non_generic:
+                return max(non_generic, key=len), f"{src_prefix}:Message"
+
+        # 3. og:description fallback
         m = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', html)
         if m:
             desc = clean_meta(m.group(1))
             generic = ['log in', 'see posts', 'see more', 'lihat postingan', 'facebook']
             if desc and len(desc) > 15 and not any(g in desc.lower() for g in generic):
-                return desc, "Facebook:OGDesc"
+                return desc, f"{src_prefix}:OGDesc"
         return None, None
 
     try:
+        debug_log = []
+
+        # Step 1: Resolve /share/r/, /share/v/, fb.watch and similar shortlinks to get the
+        # canonical reel/video ID. Use Googlebot UA which Facebook treats as VIP.
         resolved_url = url
+        video_id = None
+        try:
+            r = requests.get(url, headers=bot_headers, allow_redirects=True, timeout=15)
+            if r.status_code == 200:
+                resolved_url = r.url
+                # Try extraction immediately — if Googlebot got the page, this often works
+                cap, src = try_extract(r.text, "Facebook")
+                if cap:
+                    return cap, src
+            # Pull video ID from final URL or response body
+            vid_m = re.search(r'(?:reel/|watch/?[?&]v=|videos?/|/video/)(\d{10,})', r.url + r.text[:8000])
+            if vid_m:
+                video_id = vid_m.group(1)
+            debug_log.append(f"bot:{r.status_code}")
+        except Exception as e:
+            debug_log.append(f"botErr:{str(e)[:15]}")
 
-        # Try direct fetch first with multiple UA strategies
-        for headers in [bot_headers, desktop_headers]:
-            try:
-                r = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
-                if r.status_code == 200:
-                    cap, src = try_extract(r.text)
-                    if cap:
-                        return cap, src
-                    # Try to resolve video ID from final URL or page
-                    vid_m = re.search(r'(?:reel/|watch/?[?&]v=|videos?/|/video/)(\d{10,})', r.url + r.text[:5000])
+        # Step 2: Try desktop UA on the original URL
+        try:
+            r = requests.get(url, headers=desktop_headers, allow_redirects=True, timeout=15)
+            if r.status_code == 200:
+                cap, src = try_extract(r.text, "Facebook")
+                if cap:
+                    return cap, src
+                if not video_id:
+                    vid_m = re.search(r'(?:reel/|watch/?[?&]v=|videos?/|/video/)(\d{10,})', r.url + r.text[:8000])
                     if vid_m:
-                        resolved_url = f'https://www.facebook.com/watch/?v={vid_m.group(1)}'
-                        break
-            except:
-                continue
+                        video_id = vid_m.group(1)
+            debug_log.append(f"dsk:{r.status_code}")
+        except Exception as e:
+            debug_log.append(f"dskErr:{str(e)[:15]}")
 
-        # Try watch page if we got a video ID
-        if 'watch/?v=' in resolved_url and resolved_url != url:
+        # Step 3: If we have a video ID, try the lighter-weight m.facebook.com endpoint
+        # with iPhone UA — only ~13KB and frequently bypasses the desktop login wall.
+        if video_id:
+            for path in ('reel', 'watch'):
+                m_url = (f'https://m.facebook.com/reel/{video_id}/' if path == 'reel'
+                         else f'https://m.facebook.com/watch/?v={video_id}')
+                try:
+                    r = requests.get(m_url, headers=iphone_headers, allow_redirects=True, timeout=15)
+                    if r.status_code == 200:
+                        cap, src = try_extract(r.text, "Facebook:M")
+                        if cap:
+                            return cap, src
+                    debug_log.append(f"m.{path}:{r.status_code}")
+                except Exception as e:
+                    debug_log.append(f"m.{path}Err:{str(e)[:15]}")
+
+            # Step 4: plugins/post.php embed — sometimes returns rendered description
+            # when the main page is gated. Works for reels too.
             try:
-                r_watch = requests.get(resolved_url, headers=desktop_headers, allow_redirects=True, timeout=15)
-                if r_watch.status_code == 200:
-                    cap, src = try_extract(r_watch.text)
+                from urllib.parse import quote as _q
+                plugin_url = f'https://www.facebook.com/plugins/post.php?href={_q(f"https://www.facebook.com/reel/{video_id}/", safe="")}&show_text=true'
+                r = requests.get(plugin_url, headers=bot_headers, allow_redirects=True, timeout=15)
+                if r.status_code == 200:
+                    cap, src = try_extract(r.text, "Facebook:Plugin")
                     if cap:
                         return cap, src
-            except:
-                pass
+                debug_log.append(f"plg:{r.status_code}")
+            except Exception as e:
+                debug_log.append(f"plgErr:{str(e)[:15]}")
 
-        return None, "Facebook:LoginWall"
+            # Step 5: canonical reel URL with Googlebot (in case the original short URL
+            # was the only thing being blocked)
+            try:
+                canonical = f'https://www.facebook.com/reel/{video_id}/'
+                r = requests.get(canonical, headers=bot_headers, allow_redirects=True, timeout=15)
+                if r.status_code == 200:
+                    cap, src = try_extract(r.text, "Facebook:Canon")
+                    if cap:
+                        return cap, src
+                debug_log.append(f"canon:{r.status_code}")
+            except Exception as e:
+                debug_log.append(f"canonErr:{str(e)[:15]}")
+
+        return None, f"Facebook:LoginWall|{','.join(debug_log)}"
     except Exception as e:
         return None, f"Facebook:Err:{str(e)[:20]}"
 
