@@ -21,7 +21,7 @@ def get_tiktok_embed_html(video_id):
         'Accept-Language': 'en-US,en;q=0.5',
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=6)
         if resp.status_code == 200:
             return resp.text
         return None
@@ -35,7 +35,7 @@ def get_tiktok_tikwm(url):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
         }
-        resp = requests.get(api_url, headers=headers, timeout=10)
+        resp = requests.get(api_url, headers=headers, timeout=6)
         if resp.status_code == 200:
             data = resp.json()
             if data.get('code') == 0:
@@ -56,7 +56,7 @@ def get_tiktok_oembed(url):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
         }
-        resp = requests.get(oembed_url, headers=headers, timeout=10)
+        resp = requests.get(oembed_url, headers=headers, timeout=6)
         if resp.status_code == 200:
             data = resp.json()
             # oEmbed 'title' often contains the caption
@@ -111,20 +111,19 @@ def get_tiktok_caption(url, expected_code=None):
     ]
 
     try:
-        # 1. Resolve short URLs
+        # 1. Resolve short URLs. If HEAD fails it usually means VPS can't reach the
+        # short-URL host at all (vt.tiktok.com is frequently flaky from datacenter
+        # IPs), so a follow-up GET would just burn another timeout. Skip it.
         if 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
-            # Short URLs are very common, resolving them first is critical
             try:
-                response = session.head(url, headers=headers, allow_redirects=True, timeout=10)
+                response = session.head(url, headers=headers, allow_redirects=True, timeout=5)
                 url = response.url
             except:
-                # If HEAD fails, try GET to resolve
-                response = session.get(url, headers=headers, allow_redirects=True, timeout=10)
-                url = response.url
-            
+                debug_log.append("ResolveFail")
+
         # 2. Main Page Scraping (Primary - Full JSON)
         try:
-            response = session.get(url, headers=headers, timeout=15)
+            response = session.get(url, headers=headers, timeout=8)
             html = response.text
 
             # Pattern 0: EARLY EXACT CODE CHECK on main HTML (Highest Reliability)
@@ -367,7 +366,7 @@ def get_youtube_caption(url, expected_code=None):
         
         # Direct Scraping with Googlebot UA
         try:
-            response = requests.get(f"https://www.youtube.com/watch?v={video_id}", headers=headers, timeout=10)
+            response = requests.get(f"https://www.youtube.com/watch?v={video_id}", headers=headers, timeout=7)
             html = response.text
             debug['len'] = len(html)
             
@@ -510,7 +509,7 @@ def get_instagram_caption(url, expected_code=None):
         # Method 1: Try oEmbed API (most reliable, no login needed)
         try:
             oembed_url = f"https://api.instagram.com/oembed/?url=https://www.instagram.com/p/{shortcode}/"
-            response = requests.get(oembed_url, timeout=10)
+            response = requests.get(oembed_url, timeout=6)
             if response.status_code == 200:
                 data = response.json()
                 title = data.get('title', '')
@@ -527,7 +526,7 @@ def get_instagram_caption(url, expected_code=None):
                 'Accept-Language': 'en-US,en;q=0.5',
             }
             clean_url = f"https://www.instagram.com/p/{shortcode}/"
-            response = requests.get(clean_url, headers=mobile_headers, timeout=10)
+            response = requests.get(clean_url, headers=mobile_headers, timeout=6)
             html = response.text
             
             # 2a. Look for description meta tag - Improved Extraction
@@ -594,7 +593,7 @@ def get_instagram_caption(url, expected_code=None):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             }
-            response = requests.get(f"https://www.instagram.com/p/{shortcode}/", headers=desktop_headers, timeout=10)
+            response = requests.get(f"https://www.instagram.com/p/{shortcode}/", headers=desktop_headers, timeout=6)
             html = response.text
             
             # 3a. Look for sharedData JSON
@@ -645,7 +644,7 @@ def get_threads_caption(url, expected_code=None):
         'Accept-Language': 'en-US,en;q=0.9',
     }
     try:
-        response = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
+        response = requests.get(url, headers=headers, allow_redirects=True, timeout=8)
         html = response.text
 
         scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
@@ -708,7 +707,7 @@ def get_x_caption(url, expected_code=None):
             username = username_match.group(1) if username_match else 'i'
             r_vx = requests.get(
                 f'https://api.vxtwitter.com/{username}/status/{tweet_id}',
-                headers={'User-Agent': 'Mozilla/5.0'}, timeout=10
+                headers={'User-Agent': 'Mozilla/5.0'}, timeout=6
             )
             if r_vx.status_code == 200:
                 vx_data = r_vx.json()
@@ -721,10 +720,10 @@ def get_x_caption(url, expected_code=None):
         # Method 2: X GraphQL Guest API
         try:
             ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            r_home = requests.get('https://x.com', headers={'User-Agent': ua}, timeout=10)
+            r_home = requests.get('https://x.com', headers={'User-Agent': ua}, timeout=6)
             js_urls = re.findall(r'https://abs\.twimg\.com/responsive-web/client-web/main\.[^"]+\.js', r_home.text)
             if js_urls:
-                r_js = requests.get(js_urls[0], headers={'User-Agent': ua}, timeout=15)
+                r_js = requests.get(js_urls[0], headers={'User-Agent': ua}, timeout=8)
                 js_text = r_js.text
 
                 bearer_match = re.search(r'"(AAAAAAAAAAAAAAAAAAAAANR[A-Za-z0-9+/=_%]{50,150})"', js_text)
@@ -737,7 +736,7 @@ def get_x_caption(url, expected_code=None):
                     r_guest = requests.post(
                         'https://api.x.com/1.1/guest/activate.json',
                         headers={'Authorization': f'Bearer {bearer}', 'User-Agent': ua},
-                        timeout=10
+                        timeout=6
                     )
                     if r_guest.status_code == 200:
                         guest_token = r_guest.json().get('guest_token', '')
@@ -783,7 +782,7 @@ def get_x_caption(url, expected_code=None):
                                     'x-twitter-active-user': 'yes',
                                     'x-twitter-client-language': 'en',
                                 },
-                                timeout=15
+                                timeout=8
                             )
                             if r_gql.status_code == 200:
                                 gql_data = r_gql.json()
@@ -825,7 +824,7 @@ def get_capcut_caption(url, expected_code=None):
         'Accept-Language': 'en-US,en;q=0.9',
     }
     try:
-        response = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
+        response = requests.get(url, headers=headers, allow_redirects=True, timeout=8)
         html = response.text
 
         # Extract __MODERN_ROUTER_DATA__ (embedded as <script id="__MODERN_ROUTER_DATA__">JSON</script>)
@@ -862,28 +861,25 @@ def get_capcut_caption(url, expected_code=None):
 
 def get_facebook_caption(url, expected_code=None):
     """Scrape caption from Facebook video/reel/post URL.
-    Strategy: try multiple endpoints (canonical, m.facebook.com, watch, plugins/post.php)
-    with header rotation. Each response is first grepped for the expected code as the
-    highest-confidence signal (bypasses fragile JSON regex extraction)."""
+    Tight time budget: max ~20s wall-clock so nginx (60s) never times out even when
+    other handlers (TikTok etc) have already eaten part of the budget. Tries up to
+    3 endpoints and stops the moment a caption (or the expected code) is found."""
+    import time as _time
+    deadline = _time.time() + 20.0
+
     bot_headers = {
         'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-    }
-    desktop_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Upgrade-Insecure-Requests': '1',
     }
     iphone_headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
     }
+
+    def remaining():
+        return max(0.5, deadline - _time.time())
 
     def clean_meta(text):
         return (text.replace('&amp;', '&').replace('&quot;', '"')
@@ -892,48 +888,38 @@ def get_facebook_caption(url, expected_code=None):
 
     def grep_code(html, source):
         """If expected_code is anywhere in raw HTML, return high-confidence snippet.
-        We deliberately do NOT strip HTML tags here: the code is often inside a meta
-        tag's content attribute, and tag-stripping would erase it along with the tag,
-        making a valid match look invalid downstream."""
+        Tags are NOT stripped: code is often inside <meta content="..."> and stripping
+        the surrounding tag would erase the code along with it."""
         if not expected_code:
             return None, None
         if expected_code.lower() in html.lower():
             idx = html.lower().find(expected_code.lower())
             start = max(0, idx - 200)
             end = min(len(html), idx + len(expected_code) + 200)
-            snip = html[start:end]
-            snip = re.sub(r'\s+', ' ', snip).strip()
+            snip = re.sub(r'\s+', ' ', html[start:end]).strip()
             return f"...{snip}...", source
         return None, None
 
     def try_extract(html, src_prefix="Facebook"):
-        # 0. Highest-confidence: exact code grep on raw HTML (bypasses regex fragility)
         cap, src = grep_code(html, f"{src_prefix}:HTML-Grepped")
         if cap:
             return cap, src
-
-        # 1. story_title JSON
         m = re.search(r'"story_title"\s*:\s*\{"text"\s*:\s*"([^"]+)"', html)
         if m:
             return m.group(1), f"{src_prefix}:StoryTitle"
-
-        # 2. message JSON field — collect ALL matches and pick the most descriptive one.
-        # The original regex took only the first match, which on the reel page often
-        # captures comments or related-post text instead of the actual reel caption.
+        # Collect all message candidates and prefer the one containing the code.
+        # The original first-match regex often grabbed a comment or a related-post
+        # snippet instead of the real reel caption.
         msgs = re.findall(r'"message"\s*:\s*\{"text"\s*:\s*"([^"]{10,})"', html)
         if msgs:
-            # Prefer the message that contains the expected code
             if expected_code:
                 for msg in msgs:
                     if expected_code.lower() in msg.lower():
                         return msg, f"{src_prefix}:Message-CodeMatch"
-            # Otherwise the longest non-generic message
             generic = ['log in', 'see posts', 'see more', 'lihat postingan']
             non_generic = [m for m in msgs if not any(g in m.lower() for g in generic)]
             if non_generic:
                 return max(non_generic, key=len), f"{src_prefix}:Message"
-
-        # 3. og:description fallback
         m = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', html)
         if m:
             desc = clean_meta(m.group(1))
@@ -942,90 +928,59 @@ def get_facebook_caption(url, expected_code=None):
                 return desc, f"{src_prefix}:OGDesc"
         return None, None
 
-    try:
-        debug_log = []
+    debug_log = []
 
-        # Step 1: Resolve /share/r/, /share/v/, fb.watch and similar shortlinks to get the
-        # canonical reel/video ID. Use Googlebot UA which Facebook treats as VIP.
-        resolved_url = url
-        video_id = None
-        try:
-            r = requests.get(url, headers=bot_headers, allow_redirects=True, timeout=15)
-            if r.status_code == 200:
-                resolved_url = r.url
-                # Try extraction immediately — if Googlebot got the page, this often works
-                cap, src = try_extract(r.text, "Facebook")
-                if cap:
-                    return cap, src
-            # Pull video ID from final URL or response body
-            vid_m = re.search(r'(?:reel/|watch/?[?&]v=|videos?/|/video/)(\d{10,})', r.url + r.text[:8000])
+    # Attempt 1: Googlebot on original URL — handles /share/r/ redirects automatically
+    # and is what Facebook serves the most caption-rich HTML to.
+    video_id = None
+    try:
+        r = requests.get(url, headers=bot_headers, allow_redirects=True,
+                         timeout=min(10, remaining()))
+        if r.status_code == 200:
+            cap, src = try_extract(r.text, "Facebook")
+            if cap:
+                return cap, src
+            vid_m = re.search(r'(?:reel/|watch/?[?&]v=|videos?/|/video/)(\d{10,})',
+                              r.url + r.text[:8000])
             if vid_m:
                 video_id = vid_m.group(1)
-            debug_log.append(f"bot:{r.status_code}")
-        except Exception as e:
-            debug_log.append(f"botErr:{str(e)[:15]}")
+        debug_log.append(f"bot:{r.status_code}")
+    except Exception as e:
+        debug_log.append(f"botErr:{str(e)[:15]}")
 
-        # Step 2: Try desktop UA on the original URL
+    # Attempt 2: lightweight m.facebook.com (~13KB) — frequently bypasses login wall
+    # when full desktop site does not. Skip if we have no video ID or no time left.
+    if video_id and remaining() > 4:
         try:
-            r = requests.get(url, headers=desktop_headers, allow_redirects=True, timeout=15)
+            r = requests.get(f'https://m.facebook.com/reel/{video_id}/',
+                             headers=iphone_headers, allow_redirects=True,
+                             timeout=min(7, remaining()))
             if r.status_code == 200:
-                cap, src = try_extract(r.text, "Facebook")
+                cap, src = try_extract(r.text, "Facebook:M")
                 if cap:
                     return cap, src
-                if not video_id:
-                    vid_m = re.search(r'(?:reel/|watch/?[?&]v=|videos?/|/video/)(\d{10,})', r.url + r.text[:8000])
-                    if vid_m:
-                        video_id = vid_m.group(1)
-            debug_log.append(f"dsk:{r.status_code}")
+            debug_log.append(f"m.reel:{r.status_code}")
         except Exception as e:
-            debug_log.append(f"dskErr:{str(e)[:15]}")
+            debug_log.append(f"m.reelErr:{str(e)[:15]}")
 
-        # Step 3: If we have a video ID, try the lighter-weight m.facebook.com endpoint
-        # with iPhone UA — only ~13KB and frequently bypasses the desktop login wall.
-        if video_id:
-            for path in ('reel', 'watch'):
-                m_url = (f'https://m.facebook.com/reel/{video_id}/' if path == 'reel'
-                         else f'https://m.facebook.com/watch/?v={video_id}')
-                try:
-                    r = requests.get(m_url, headers=iphone_headers, allow_redirects=True, timeout=15)
-                    if r.status_code == 200:
-                        cap, src = try_extract(r.text, "Facebook:M")
-                        if cap:
-                            return cap, src
-                    debug_log.append(f"m.{path}:{r.status_code}")
-                except Exception as e:
-                    debug_log.append(f"m.{path}Err:{str(e)[:15]}")
+    # Attempt 3: plugins/post.php embed — last resort, only if budget allows
+    if video_id and remaining() > 4:
+        try:
+            from urllib.parse import quote as _q
+            plugin_url = ('https://www.facebook.com/plugins/post.php?href='
+                          + _q(f'https://www.facebook.com/reel/{video_id}/', safe='')
+                          + '&show_text=true')
+            r = requests.get(plugin_url, headers=bot_headers, allow_redirects=True,
+                             timeout=min(7, remaining()))
+            if r.status_code == 200:
+                cap, src = try_extract(r.text, "Facebook:Plugin")
+                if cap:
+                    return cap, src
+            debug_log.append(f"plg:{r.status_code}")
+        except Exception as e:
+            debug_log.append(f"plgErr:{str(e)[:15]}")
 
-            # Step 4: plugins/post.php embed — sometimes returns rendered description
-            # when the main page is gated. Works for reels too.
-            try:
-                from urllib.parse import quote as _q
-                plugin_url = f'https://www.facebook.com/plugins/post.php?href={_q(f"https://www.facebook.com/reel/{video_id}/", safe="")}&show_text=true'
-                r = requests.get(plugin_url, headers=bot_headers, allow_redirects=True, timeout=15)
-                if r.status_code == 200:
-                    cap, src = try_extract(r.text, "Facebook:Plugin")
-                    if cap:
-                        return cap, src
-                debug_log.append(f"plg:{r.status_code}")
-            except Exception as e:
-                debug_log.append(f"plgErr:{str(e)[:15]}")
-
-            # Step 5: canonical reel URL with Googlebot (in case the original short URL
-            # was the only thing being blocked)
-            try:
-                canonical = f'https://www.facebook.com/reel/{video_id}/'
-                r = requests.get(canonical, headers=bot_headers, allow_redirects=True, timeout=15)
-                if r.status_code == 200:
-                    cap, src = try_extract(r.text, "Facebook:Canon")
-                    if cap:
-                        return cap, src
-                debug_log.append(f"canon:{r.status_code}")
-            except Exception as e:
-                debug_log.append(f"canonErr:{str(e)[:15]}")
-
-        return None, f"Facebook:LoginWall|{','.join(debug_log)}"
-    except Exception as e:
-        return None, f"Facebook:Err:{str(e)[:20]}"
+    return None, f"Facebook:LoginWall|{','.join(debug_log)}"
 
 
 # --- FastAPI App ---
