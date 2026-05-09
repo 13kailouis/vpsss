@@ -3,12 +3,56 @@ import re
 import requests
 import traceback
 import os
+import time
+import threading
 from urllib.parse import parse_qs, urlparse
 import html as html_lib
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# ============================================================
+# In-memory cache untuk hasil scrape — TTL 5 menit
+# Mengurangi beban ke TikTok/IG/YT saat banyak admin scrape URL yang sama
+# ============================================================
+CACHE_TTL_SECONDS = int(os.environ.get('SCRAPE_CACHE_TTL', '300'))  # 5 menit
+_scrape_cache: dict = {}  # { url: (timestamp, result_dict) }
+_cache_lock = threading.Lock()
+_last_cleanup_ts = 0.0
+
+def _cache_get(url: str):
+    """Return cached result kalau masih fresh, else None."""
+    now = time.time()
+    with _cache_lock:
+        entry = _scrape_cache.get(url)
+        if not entry:
+            return None
+        ts, data = entry
+        if now - ts > CACHE_TTL_SECONDS:
+            # Expired — hapus
+            _scrape_cache.pop(url, None)
+            return None
+        return data
+
+def _cache_set(url: str, data: dict):
+    """Simpan hasil ke cache — hanya kalau bukan error."""
+    if not data or 'error' in data:
+        return
+    global _last_cleanup_ts
+    now = time.time()
+    with _cache_lock:
+        _scrape_cache[url] = (now, data)
+        # Cleanup expired entries setiap 60 detik supaya dict tidak grow tanpa batas
+        if now - _last_cleanup_ts > 60:
+            _last_cleanup_ts = now
+            expired_keys = [k for k, (t, _) in _scrape_cache.items() if now - t > CACHE_TTL_SECONDS]
+            for k in expired_keys:
+                _scrape_cache.pop(k, None)
+
+def _cache_stats():
+    with _cache_lock:
+        return {"size": len(_scrape_cache), "ttl_seconds": CACHE_TTL_SECONDS}
 
 # --- SCRAPER LOGIC START ---
 
@@ -1086,7 +1130,16 @@ class ScrapeRequest(BaseModel):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "matrix-scrapper"}
+    return {"status": "ok", "service": "matrix-scrapper", "cache": _cache_stats()}
+
+
+@app.post("/api/cache/clear")
+def cache_clear():
+    """Clear semua cache — dipakai admin saat debug atau force refresh."""
+    with _cache_lock:
+        before = len(_scrape_cache)
+        _scrape_cache.clear()
+    return {"cleared": before}
 
 
 @app.post("/api/scrape")
@@ -1103,29 +1156,49 @@ def scrape(req: ScrapeRequest):
     if len(urls) > 50:
         urls = urls[:50]
 
+    # Dedupe & normalize sambil pertahankan urutan asli untuk respons
+    seen = set()
+    deduped_urls = []
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            deduped_urls.append(u)
+
+    # 1) Cek cache dulu — URL yang sudah ada di cache tidak perlu scrape ulang
     results = {}
-    try:
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            future_to_url = {executor.submit(process_single_url, url): url for url in urls}
-            for future in future_to_url:
-                url = future_to_url[future]
-                try:
-                    data = future.result()
-                    if data and 'error' not in data:
-                        results[url] = data
-                    else:
-                        results[url] = {
-                            'error': 'Failed to fetch',
-                            'details': data.get('error') if data else 'Unknown',
-                        }
-                except Exception as e:
-                    results[url] = {'error': str(e)}
-    except Exception:
-        err = traceback.format_exc()
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "Internal Server Error", "details": str(err)},
-        )
+    urls_to_scrape = []
+    for u in deduped_urls:
+        cached = _cache_get(u)
+        if cached is not None:
+            results[u] = cached
+        else:
+            urls_to_scrape.append(u)
+
+    # 2) Scrape hanya yang belum di-cache
+    if urls_to_scrape:
+        try:
+            with ThreadPoolExecutor(max_workers=30) as executor:
+                future_to_url = {executor.submit(process_single_url, u): u for u in urls_to_scrape}
+                for future in future_to_url:
+                    u = future_to_url[future]
+                    try:
+                        data = future.result()
+                        if data and 'error' not in data:
+                            results[u] = data
+                            _cache_set(u, data)  # simpan ke cache
+                        else:
+                            results[u] = {
+                                'error': 'Failed to fetch',
+                                'details': data.get('error') if data else 'Unknown',
+                            }
+                    except Exception as e:
+                        results[u] = {'error': str(e)}
+        except Exception:
+            err = traceback.format_exc()
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Internal Server Error", "details": str(err)},
+            )
 
     # If single URL request, maintain backward compatibility format
     if single_url and not req.urls and len(urls) == 1:
