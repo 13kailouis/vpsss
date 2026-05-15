@@ -509,6 +509,57 @@ def get_instagram_caption(url, expected_code=None):
         # Method 1: Instagram public oEmbed used to work without auth; as of 2024+
         # api.instagram.com/oembed returns an HTML login wall, not JSON. Skipped.
 
+        # Method 1b: /embed/captioned/ — designed for iframe embedding, much more
+        # permissive than the main page (still returns 200 from datacenter IPs that
+        # get 429 on the main URL). Caption sits inside <div class="Caption">.
+        try:
+            embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+            for ua in [
+                'facebookexternalhit/1.1',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+            ]:
+                try:
+                    r = requests.get(embed_url, headers={'User-Agent': ua}, timeout=8)
+                    if r.status_code != 200:
+                        debug_log.append(f"emb-{ua[:3]}:{r.status_code}")
+                        continue
+                    page = r.text
+                    # Look for the Caption div — class is literally "Caption"
+                    cap_match = re.search(
+                        r'<div[^>]*class="[^"]*\bCaption\b[^"]*"[^>]*>(.*?)</div>\s*</div>',
+                        page, re.DOTALL,
+                    )
+                    if not cap_match:
+                        cap_match = re.search(
+                            r'<div[^>]*class="[^"]*\bCaption\b[^"]*"[^>]*>(.*?)</div>',
+                            page, re.DOTALL,
+                        )
+                    if cap_match:
+                        raw = cap_match.group(1)
+                        # Strip nested tags, keep text/whitespace, unescape entities
+                        text = re.sub(r'<[^>]+>', ' ', raw)
+                        try:
+                            import html as _html
+                            text = _html.unescape(text)
+                        except Exception:
+                            pass
+                        text = re.sub(r'[ \t]+', ' ', text).strip()
+                        if text and len(text) > 5:
+                            return text, "Src:Embed-Captioned"
+                    # Fallback: grep for expected code anywhere in embed HTML
+                    if expected_code and expected_code.lower() in page.lower():
+                        idx = page.lower().find(expected_code.lower())
+                        snip = re.sub(r'<[^>]+>', ' ',
+                                       page[max(0, idx-200):idx+len(expected_code)+200])
+                        snip = re.sub(r'\s+', ' ', snip).strip()
+                        return f"...{snip}...", "Src:Embed-Grepped"
+                    debug_log.append(f"emb-{ua[:3]}:NoCap")
+                except Exception as e:
+                    debug_log.append(f"embErr:{str(e)[:15]}")
+        except Exception as e:
+            debug_log.append(f"EmbErr:{str(e)[:15]}")
+
         # Method 2: Crawler/Mobile UA scraping — try a list of UAs. Datacenter IPs
         # (Hostinger/Vercel/etc) often get a login wall on the default Instagram UA,
         # but social/search crawler UAs still receive a clean og:description for
