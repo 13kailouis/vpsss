@@ -509,22 +509,48 @@ def get_instagram_caption(url, expected_code=None):
         # Method 1: Instagram public oEmbed used to work without auth; as of 2024+
         # api.instagram.com/oembed returns an HTML login wall, not JSON. Skipped.
 
-        # Method 2: Mobile User Agent scraping
+        # Method 2: Crawler/Mobile UA scraping — try a list of UAs. Datacenter IPs
+        # (Hostinger/Vercel/etc) often get a login wall on the default Instagram UA,
+        # but social/search crawler UAs still receive a clean og:description for
+        # public posts. We try them in order of reliability.
+        ua_list = [
+            ('facebot', 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'),
+            ('whatsapp', 'WhatsApp/2.23.20.0'),
+            ('bingbot', 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)'),
+            ('googlebot', 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'),
+            ('iphone', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'),
+            ('igapp', 'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; samsung; SM-G950F; dreamlte; samsungexynos8895; en_US)'),
+        ]
+        clean_url = f"https://www.instagram.com/p/{shortcode}/"
+        html = None
+        used_ua = None
+        desc_match = None
+        for tag, ua in ua_list:
+            try:
+                hdrs = {
+                    'User-Agent': ua,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                }
+                response = requests.get(clean_url, headers=hdrs, timeout=6, allow_redirects=True)
+                if response.status_code != 200:
+                    debug_log.append(f"{tag}:{response.status_code}")
+                    continue
+                page = response.text
+                m = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', page)
+                if not m:
+                    m = re.search(r'<meta[^>]*content="([^"]*)"[^>]*property="og:description"', page)
+                if m and m.group(1).strip():
+                    html = page
+                    used_ua = tag
+                    desc_match = m
+                    break
+                else:
+                    debug_log.append(f"{tag}:NoMeta")
+            except Exception as e:
+                debug_log.append(f"{tag}Err:{str(e)[:15]}")
+
         try:
-            mobile_headers = {
-                'User-Agent': 'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; samsung; SM-G950F; dreamlte; samsungexynos8895; en_US)',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-            }
-            clean_url = f"https://www.instagram.com/p/{shortcode}/"
-            response = requests.get(clean_url, headers=mobile_headers, timeout=6)
-            html = response.text
-            
-            # 2a. Look for description meta tag - Improved Extraction
-            desc_match = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', html)
-            if not desc_match:
-                desc_match = re.search(r'<meta[^>]*content="([^"]*)"[^>]*property="og:description"', html)
-                
             if desc_match:
                 raw_desc = desc_match.group(1)
                 raw_desc = (raw_desc.replace('&amp;', '&').replace('&quot;', '"')
@@ -544,21 +570,21 @@ def get_instagram_caption(url, expected_code=None):
                 if greedy_match:
                     res = greedy_match.group(1).strip()
                     if res:
-                        return res, "Src:MobileMeta-Greedy"
+                        return res, f"Src:Meta-Greedy-{used_ua}"
 
                 # Fallback: any quoted segment — take the longest (usually the caption)
                 caption_parts = re.findall(r'[:\s]["“](.*?)["”]', raw_desc, re.DOTALL)
                 if caption_parts:
                     longest = max(caption_parts, key=len).strip()
                     if longest:
-                        return longest, "Src:MobileMeta-Refined"
+                        return longest, f"Src:Meta-Refined-{used_ua}"
 
                 # Last resort: return the raw og:description so upstream can compare codes
                 if raw_desc.strip():
-                    return raw_desc, "Src:MobileMeta-Raw"
+                    return raw_desc, f"Src:Meta-Raw-{used_ua}"
 
             # 2b. Search for exact expected code directly in HTML - VERY RELIABLE FALLBACK
-            if expected_code and expected_code.lower() in html.lower():
+            if html and expected_code and expected_code.lower() in html.lower():
                 code_idx = html.lower().find(expected_code.lower())
                 start = max(0, code_idx - 200)
                 end = min(len(html), code_idx + len(expected_code) + 200)
@@ -567,19 +593,16 @@ def get_instagram_caption(url, expected_code=None):
                 return f"...{snip}...", "Src:HTML-Grepped-ExactCode"
 
             # Legacy WF code fallback (for older WF- format)
-            wf_match = re.search(r'WF-[A-Z0-9]{4}-[A-Z0-9]{4}', html)
-            if wf_match:
-                # Find the surrounding text to provide some context
-                start = max(0, wf_match.start() - 200)
-                end = min(len(html), wf_match.end() + 200)
-                snip = html[start:end]
-                # Clean up HTML tags from snippet
-                snip = re.sub(r'<[^>]+>', ' ', snip)
-                return f"...{snip}...", "Src:HTML-Grepped-Code"
-
-            debug_log.append("Mobile:NoMeta")
+            if html:
+                wf_match = re.search(r'WF-[A-Z0-9]{4}-[A-Z0-9]{4}', html)
+                if wf_match:
+                    start = max(0, wf_match.start() - 200)
+                    end = min(len(html), wf_match.end() + 200)
+                    snip = html[start:end]
+                    snip = re.sub(r'<[^>]+>', ' ', snip)
+                    return f"...{snip}...", "Src:HTML-Grepped-Code"
         except Exception as e:
-            debug_log.append(f"MobileErr:{str(e)[:20]}")
+            debug_log.append(f"ParseErr:{str(e)[:20]}")
 
         # Method 3: Desktop User Agent & JSON hunting
         try:
