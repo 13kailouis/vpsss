@@ -506,17 +506,8 @@ def get_instagram_caption(url, expected_code=None):
         if not shortcode:
             return None, "Invalid URL"
         
-        # Method 1: Try oEmbed API (most reliable, no login needed)
-        try:
-            oembed_url = f"https://api.instagram.com/oembed/?url=https://www.instagram.com/p/{shortcode}/"
-            response = requests.get(oembed_url, timeout=6)
-            if response.status_code == 200:
-                data = response.json()
-                title = data.get('title', '')
-                if title: return title, "Src:oEmbed"
-            debug_log.append(f"oEmbed:{response.status_code}")
-        except Exception as e:
-            debug_log.append(f"oEmbedErr:{str(e)[:20]}")
+        # Method 1: Instagram public oEmbed used to work without auth; as of 2024+
+        # api.instagram.com/oembed returns an HTML login wall, not JSON. Skipped.
 
         # Method 2: Mobile User Agent scraping
         try:
@@ -536,32 +527,35 @@ def get_instagram_caption(url, expected_code=None):
                 
             if desc_match:
                 raw_desc = desc_match.group(1)
-                raw_desc = raw_desc.replace('&amp;', '&').replace('&quot;', '"')
-                
-                # Try greedy match for everything inside quotes after a colon or "Instagram"
+                raw_desc = (raw_desc.replace('&amp;', '&').replace('&quot;', '"')
+                                    .replace('&#39;', "'").replace('&#x27;', "'")
+                                    .replace('&lt;', '<').replace('&gt;', '>'))
+                # Decode numeric HTML entities (&#x1f496; etc) so emoji/whitespace survive
+                try:
+                    import html as _html
+                    raw_desc = _html.unescape(raw_desc)
+                except Exception:
+                    pass
+
+                # Instagram og:description format:
+                #   "0 likes, 0 comments - user on May 15, 2026: \"CAPTION\". "
+                # Extract the quoted caption — greedy so multi-line captions survive.
                 greedy_match = re.search(r'(?:Instagram|:)\s*["“](.*)["”]', raw_desc, re.DOTALL)
                 if greedy_match:
-                    res = greedy_match.group(1)
-                    if expected_code and expected_code.upper() in res.upper():
-                        return res, "Src:MobileMeta-Greedy-Exact"
-                    elif 'WF-' in res.upper():
+                    res = greedy_match.group(1).strip()
+                    if res:
                         return res, "Src:MobileMeta-Greedy"
-                
-                # Check for "Username (@user) on Instagram: 'Caption'" or "Username on Instagram: 'Caption'"
-                caption_parts = re.findall(r'[:\s]["“](.*?)["”]', raw_desc)
+
+                # Fallback: any quoted segment — take the longest (usually the caption)
+                caption_parts = re.findall(r'[:\s]["“](.*?)["”]', raw_desc, re.DOTALL)
                 if caption_parts:
-                    # Take the last quoted part which is usually the actual caption
-                    for part in reversed(caption_parts):
-                        if expected_code and expected_code.upper() in part.upper():
-                            return part, "Src:MobileMeta-Refined-Exact"
-                        elif 'WF-' in part.upper():
-                            return part, "Src:MobileMeta-Refined-Code"
-                    
-                # If code is in raw_desc but was not extracted by patterns, just return raw_desc
-                if expected_code and expected_code.upper() in raw_desc.upper():
-                    return raw_desc, "Src:MobileMeta-Raw-Exact"
-                elif 'WF-' in raw_desc.upper():
-                    return raw_desc, "Src:MobileMeta-Raw-Code"
+                    longest = max(caption_parts, key=len).strip()
+                    if longest:
+                        return longest, "Src:MobileMeta-Refined"
+
+                # Last resort: return the raw og:description so upstream can compare codes
+                if raw_desc.strip():
+                    return raw_desc, "Src:MobileMeta-Raw"
 
             # 2b. Search for exact expected code directly in HTML - VERY RELIABLE FALLBACK
             if expected_code and expected_code.lower() in html.lower():
