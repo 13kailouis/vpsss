@@ -1163,18 +1163,36 @@ class VideoUrlRequest(BaseModel):
     url: str
 
 
-@app.post("/api/video-url")
-def get_video_url(req: VideoUrlRequest):
-    """Extract direct video URL via yt-dlp. Supports TikTok & Instagram only."""
+def _tikwm(url: str) -> Optional[dict]:
+    """Ambil direct video URL TikTok via TikWM API (no watermark, tanpa yt-dlp)."""
+    try:
+        r = requests.post(
+            'https://www.tikwm.com/api/',
+            data={'url': url, 'hd': '1'},
+            headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'},
+            timeout=15,
+        )
+        d = r.json()
+        if d.get('code') != 0 or not d.get('data'):
+            return None
+        data = d['data']
+        # Prefer HD → play (no watermark) → wmplay
+        video_url = data.get('hdplay') or data.get('play') or data.get('wmplay')
+        if not video_url:
+            return None
+        return {
+            'video_url': video_url,
+            'thumbnail': data.get('cover') or data.get('origin_cover'),
+            'title': data.get('title', ''),
+            'platform': 'TikTok',
+        }
+    except Exception:
+        return None
+
+
+def _ytdlp_instagram(url: str) -> Optional[dict]:
+    """Ambil direct video URL Instagram via yt-dlp."""
     import yt_dlp
-
-    url = req.url.strip()
-    is_tiktok = 'tiktok.com' in url
-    is_instagram = 'instagram.com' in url
-
-    if not is_tiktok and not is_instagram:
-        raise HTTPException(status_code=400, detail={"error": "Only TikTok and Instagram supported"})
-
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -1187,25 +1205,40 @@ def get_video_url(req: VideoUrlRequest):
             ),
         },
     }
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         if not info:
-            raise HTTPException(status_code=422, detail={"error": "yt-dlp returned no info"})
+            return None
         video_url = _get_best_video_url(info)
         if not video_url:
-            raise HTTPException(status_code=422, detail={"error": "No playable URL found"})
+            return None
         return {
             'video_url': video_url,
             'thumbnail': info.get('thumbnail'),
             'title': info.get('title', ''),
-            'platform': 'TikTok' if is_tiktok else 'Instagram',
+            'platform': 'Instagram',
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+    except Exception:
+        return None
+
+
+@app.post("/api/video-url")
+def get_video_url(req: VideoUrlRequest):
+    """Extract direct video URL. TikTok → TikWM API. Instagram → yt-dlp."""
+    url = req.url.strip()
+    is_tiktok = 'tiktok.com' in url
+    is_instagram = 'instagram.com' in url
+
+    if not is_tiktok and not is_instagram:
+        raise HTTPException(status_code=400, detail={"error": "Only TikTok and Instagram supported"})
+
+    result = _tikwm(url) if is_tiktok else _ytdlp_instagram(url)
+
+    if not result:
+        raise HTTPException(status_code=422, detail={"error": "Failed to extract video URL"})
+
+    return result
 
 
 @app.post("/api/cache/clear")
