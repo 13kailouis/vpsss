@@ -1190,37 +1190,70 @@ def _tikwm(url: str) -> Optional[dict]:
         return None
 
 
-def _ytdlp_instagram(url: str) -> Optional[dict]:
-    """Ambil direct video URL Instagram via yt-dlp."""
-    import yt_dlp
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
-        'format': 'best[ext=mp4]/best',
-        'http_headers': {
-            'User-Agent': (
-                'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
-                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
-            ),
-        },
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        if not info:
-            return None
-        video_url = _get_best_video_url(info)
-        if not video_url:
-            return None
-        return {
-            'video_url': video_url,
-            'thumbnail': info.get('thumbnail'),
-            'title': info.get('title', ''),
-            'platform': 'Instagram',
-        }
-    except Exception:
+def _instagram_direct_url(url: str) -> Optional[dict]:
+    """Ambil direct video URL Instagram — GraphQL (sama seperti metrics) + embed fallback."""
+    shortcode = _extract_shortcode(url)
+    if not shortcode:
         return None
+
+    session = requests.Session()
+    base_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    }
+
+    # Method 1: GraphQL — response xdt_shortcode_media punya video_url langsung
+    try:
+        session.get(
+            f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
+            headers=base_headers, timeout=8,
+        )
+        gql_headers = {
+            **base_headers,
+            'X-IG-App-ID': '936619743392459',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
+        }
+        variables = json.dumps({'shortcode': shortcode})
+        r = session.get(
+            'https://www.instagram.com/graphql/query/',
+            params={'doc_id': '8845758582119845', 'variables': variables},
+            headers=gql_headers, timeout=15,
+        )
+        r.raise_for_status()
+        media = r.json().get('data', {}).get('xdt_shortcode_media') or {}
+        video_url = media.get('video_url')
+        if video_url:
+            return {
+                'video_url': video_url,
+                'thumbnail': media.get('thumbnail_src') or media.get('display_url'),
+                'title': '',
+                'platform': 'Instagram',
+            }
+    except Exception:
+        pass
+
+    # Method 2: Embed page scraping (video_url sometimes ada di embedded JSON)
+    try:
+        embed_headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        r2 = session.get(
+            f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
+            headers=embed_headers, timeout=15,
+        )
+        if r2.status_code == 200:
+            m = re.search(r'"video_url"\s*:\s*"([^"]+)"', r2.text)
+            if m:
+                vurl = m.group(1).replace('\\u0026', '&').replace('\\/', '/')
+                return {'video_url': vurl, 'thumbnail': None, 'title': '', 'platform': 'Instagram'}
+    except Exception:
+        pass
+
+    return None
 
 
 @app.post("/api/video-url")
@@ -1233,7 +1266,7 @@ def get_video_url(req: VideoUrlRequest):
     if not is_tiktok and not is_instagram:
         raise HTTPException(status_code=400, detail={"error": "Only TikTok and Instagram supported"})
 
-    result = _tikwm(url) if is_tiktok else _ytdlp_instagram(url)
+    result = _tikwm(url) if is_tiktok else _instagram_direct_url(url)
 
     if not result:
         raise HTTPException(status_code=422, detail={"error": "Failed to extract video URL"})
