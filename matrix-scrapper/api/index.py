@@ -1190,68 +1190,86 @@ def _tikwm(url: str) -> Optional[dict]:
         return None
 
 
+def _instagram_graphql(shortcode: str) -> Optional[str]:
+    """Coba ambil video_url via Instagram GraphQL. Return video_url string atau None."""
+    session = requests.Session()
+    base_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    try:
+        # Prefetch embed page supaya dapat session cookie (penting untuk bypass rate-limit)
+        session.get(
+            f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
+            headers={'User-Agent': base_ua}, timeout=10,
+        )
+        r = session.get(
+            'https://www.instagram.com/graphql/query/',
+            params={
+                'doc_id': '8845758582119845',
+                'variables': json.dumps({'shortcode': shortcode}),
+            },
+            headers={
+                'User-Agent': base_ua,
+                'X-IG-App-ID': '936619743392459',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
+            },
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        media = r.json().get('data', {}).get('xdt_shortcode_media') or {}
+        return media.get('video_url') or None
+    except Exception:
+        return None
+
+
+def _instagram_ytdlp(url: str) -> Optional[str]:
+    """Fallback: ambil video_url via yt-dlp."""
+    import yt_dlp
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'format': 'best[ext=mp4]/best',
+        'http_headers': {
+            'User-Agent': (
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+            ),
+        },
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            return None
+        video_url = _get_best_video_url(info)
+        return video_url or None
+    except Exception:
+        return None
+
+
 def _instagram_direct_url(url: str) -> Optional[dict]:
-    """Ambil direct video URL Instagram — GraphQL (sama seperti metrics) + embed fallback."""
+    """Ambil direct video URL Instagram.
+    Strategy: GraphQL 3x retry → yt-dlp fallback.
+    """
     shortcode = _extract_shortcode(url)
     if not shortcode:
         return None
 
-    session = requests.Session()
-    base_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    }
-
-    # Method 1: GraphQL — response xdt_shortcode_media punya video_url langsung
-    try:
-        session.get(
-            f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
-            headers=base_headers, timeout=8,
-        )
-        gql_headers = {
-            **base_headers,
-            'X-IG-App-ID': '936619743392459',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
-        }
-        variables = json.dumps({'shortcode': shortcode})
-        r = session.get(
-            'https://www.instagram.com/graphql/query/',
-            params={'doc_id': '8845758582119845', 'variables': variables},
-            headers=gql_headers, timeout=15,
-        )
-        r.raise_for_status()
-        media = r.json().get('data', {}).get('xdt_shortcode_media') or {}
-        video_url = media.get('video_url')
+    # Method 1: GraphQL — retry sampai 3x (VPS IP kadang di-rate-limit IG)
+    for attempt in range(3):
+        video_url = _instagram_graphql(shortcode)
         if video_url:
-            return {
-                'video_url': video_url,
-                'thumbnail': media.get('thumbnail_src') or media.get('display_url'),
-                'title': '',
-                'platform': 'Instagram',
-            }
-    except Exception:
-        pass
+            return {'video_url': video_url, 'thumbnail': None, 'title': '', 'platform': 'Instagram'}
+        if attempt < 2:
+            time.sleep(1.5)
 
-    # Method 2: Embed page scraping (video_url sometimes ada di embedded JSON)
-    try:
-        embed_headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-        r2 = session.get(
-            f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
-            headers=embed_headers, timeout=15,
-        )
-        if r2.status_code == 200:
-            m = re.search(r'"video_url"\s*:\s*"([^"]+)"', r2.text)
-            if m:
-                vurl = m.group(1).replace('\\u0026', '&').replace('\\/', '/')
-                return {'video_url': vurl, 'thumbnail': None, 'title': '', 'platform': 'Instagram'}
-    except Exception:
-        pass
+    # Method 2: yt-dlp fallback
+    video_url = _instagram_ytdlp(url)
+    if video_url:
+        return {'video_url': video_url, 'thumbnail': None, 'title': '', 'platform': 'Instagram'}
 
     return None
 
