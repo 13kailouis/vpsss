@@ -1133,6 +1133,81 @@ def health():
     return {"status": "ok", "service": "matrix-scrapper", "cache": _cache_stats()}
 
 
+def _get_best_video_url(info: dict) -> Optional[str]:
+    """Extract the best single playable direct URL from yt-dlp info dict."""
+    if info.get('url'):
+        return info['url']
+    formats = info.get('formats') or []
+    # Prefer: mp4 with both audio + video
+    for fmt in reversed(formats):
+        url = fmt.get('url')
+        if not url:
+            continue
+        if (fmt.get('acodec', 'none') != 'none'
+                and fmt.get('vcodec', 'none') != 'none'
+                and fmt.get('ext') == 'mp4'):
+            return url
+    # Fallback: any merged stream
+    for fmt in reversed(formats):
+        url = fmt.get('url')
+        if url and fmt.get('acodec', 'none') != 'none' and fmt.get('vcodec', 'none') != 'none':
+            return url
+    # Last resort
+    for fmt in reversed(formats):
+        if fmt.get('url'):
+            return fmt['url']
+    return None
+
+
+class VideoUrlRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/video-url")
+def get_video_url(req: VideoUrlRequest):
+    """Extract direct video URL via yt-dlp. Supports TikTok & Instagram only."""
+    import yt_dlp
+
+    url = req.url.strip()
+    is_tiktok = 'tiktok.com' in url
+    is_instagram = 'instagram.com' in url
+
+    if not is_tiktok and not is_instagram:
+        raise HTTPException(status_code=400, detail={"error": "Only TikTok and Instagram supported"})
+
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'format': 'best[ext=mp4]/best',
+        'http_headers': {
+            'User-Agent': (
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+            ),
+        },
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            raise HTTPException(status_code=422, detail={"error": "yt-dlp returned no info"})
+        video_url = _get_best_video_url(info)
+        if not video_url:
+            raise HTTPException(status_code=422, detail={"error": "No playable URL found"})
+        return {
+            'video_url': video_url,
+            'thumbnail': info.get('thumbnail'),
+            'title': info.get('title', ''),
+            'platform': 'TikTok' if is_tiktok else 'Instagram',
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
 @app.post("/api/cache/clear")
 def cache_clear():
     """Clear semua cache — dipakai admin saat debug atau force refresh."""
