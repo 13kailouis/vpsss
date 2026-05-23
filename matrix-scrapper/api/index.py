@@ -1195,10 +1195,9 @@ def _instagram_graphql(shortcode: str) -> Optional[str]:
     session = requests.Session()
     base_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     try:
-        # Prefetch embed page supaya dapat session cookie (penting untuk bypass rate-limit)
         session.get(
             f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
-            headers={'User-Agent': base_ua}, timeout=10,
+            headers={'User-Agent': base_ua}, timeout=8,
         )
         r = session.get(
             'https://www.instagram.com/graphql/query/',
@@ -1214,7 +1213,7 @@ def _instagram_graphql(shortcode: str) -> Optional[str]:
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
             },
-            timeout=15,
+            timeout=12,
         )
         if r.status_code != 200:
             return None
@@ -1232,6 +1231,7 @@ def _instagram_ytdlp(url: str) -> Optional[str]:
         'no_warnings': True,
         'skip_download': True,
         'format': 'best[ext=mp4]/best',
+        'socket_timeout': 10,
         'http_headers': {
             'User-Agent': (
                 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
@@ -1244,32 +1244,33 @@ def _instagram_ytdlp(url: str) -> Optional[str]:
             info = ydl.extract_info(url, download=False)
         if not info:
             return None
-        video_url = _get_best_video_url(info)
-        return video_url or None
+        return _get_best_video_url(info) or None
     except Exception:
         return None
 
 
 def _instagram_direct_url(url: str) -> Optional[dict]:
     """Ambil direct video URL Instagram.
-    Strategy: GraphQL 3x retry → yt-dlp fallback.
+    GraphQL dan yt-dlp dijalankan PARALLEL — pakai hasil yang datang duluan.
     """
     shortcode = _extract_shortcode(url)
     if not shortcode:
         return None
 
-    # Method 1: GraphQL — retry sampai 3x (VPS IP kadang di-rate-limit IG)
-    for attempt in range(3):
-        video_url = _instagram_graphql(shortcode)
-        if video_url:
-            return {'video_url': video_url, 'thumbnail': None, 'title': '', 'platform': 'Instagram'}
-        if attempt < 2:
-            time.sleep(1.5)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Method 2: yt-dlp fallback
-    video_url = _instagram_ytdlp(url)
-    if video_url:
-        return {'video_url': video_url, 'thumbnail': None, 'title': '', 'platform': 'Instagram'}
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {
+            ex.submit(_instagram_graphql, shortcode): 'graphql',
+            ex.submit(_instagram_ytdlp, url): 'ytdlp',
+        }
+        for future in as_completed(futures):
+            try:
+                video_url = future.result()
+            except Exception:
+                continue
+            if video_url:
+                return {'video_url': video_url, 'thumbnail': None, 'title': '', 'platform': 'Instagram'}
 
     return None
 
