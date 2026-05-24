@@ -1190,6 +1190,48 @@ def _tikwm(url: str) -> Optional[dict]:
         return None
 
 
+def _tikcdn(url: str) -> Optional[dict]:
+    """Fallback: ambil video URL via tikcdn.io jika TikWM gagal."""
+    try:
+        # tikcdn API: POST form dengan field 'id' = TikTok URL
+        r = requests.post(
+            'https://tikcdn.io/ssstik/index',
+            data={'id': url, 'locale': 'en', 'tt': ''},
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://ssstik.io/',
+                'Origin': 'https://ssstik.io',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            timeout=15,
+        )
+        if not r.ok:
+            return None
+        # ssstik returns HTML with download links; extract no-watermark MP4
+        html = r.text
+        import re as _re
+        # Look for download_video_without_watermark link
+        m = _re.search(r'href="(https://[^"]+\.mp4[^"]*)"[^>]*>\s*Without watermark', html, _re.IGNORECASE)
+        if not m:
+            # Try any scontent/tikcdn mp4 link
+            m = _re.search(r'href="(https://(?:tikcdn|scontent)[^"]+\.mp4[^"]*)"', html)
+        if m:
+            return {'video_url': m.group(1), 'thumbnail': None, 'title': '', 'platform': 'TikTok'}
+        return None
+    except Exception:
+        return None
+
+
+def _get_tiktok_direct(url: str) -> Optional[dict]:
+    """Try TikWM first, fall back to tikcdn if TikWM returns no video URL."""
+    result = _tikwm(url)
+    if result:
+        return result
+    # TikWM failed — try alternate service
+    return _tikcdn(url)
+
+
 def _instagram_graphql(shortcode: str) -> Optional[str]:
     """Coba ambil video_url via Instagram GraphQL. Return video_url string atau None."""
     session = requests.Session()
@@ -1285,7 +1327,7 @@ def get_video_url(req: VideoUrlRequest):
     if not is_tiktok and not is_instagram:
         raise HTTPException(status_code=400, detail={"error": "Only TikTok and Instagram supported"})
 
-    result = _tikwm(url) if is_tiktok else _instagram_direct_url(url)
+    result = _get_tiktok_direct(url) if is_tiktok else _instagram_direct_url(url)
 
     if not result:
         raise HTTPException(status_code=422, detail={"error": "Failed to extract video URL"})
