@@ -1176,8 +1176,9 @@ def _tikwm(url: str) -> Optional[dict]:
         if d.get('code') != 0 or not d.get('data'):
             return None
         data = d['data']
-        # Prefer play (H.264, universal browser compat) → hdplay (may be H.265) → wmplay
-        video_url = data.get('play') or data.get('hdplay') or data.get('wmplay')
+        # play = no watermark H.264 | wmplay = watermark H.264 | hdplay = may be H.265
+        # Avoid hdplay on web (H.265 not supported by Chrome) — use wmplay as H.264 fallback
+        video_url = data.get('play') or data.get('wmplay') or data.get('hdplay')
         if not video_url:
             return None
         return {
