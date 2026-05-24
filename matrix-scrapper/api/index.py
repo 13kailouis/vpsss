@@ -1293,6 +1293,32 @@ def get_video_url(req: VideoUrlRequest):
     return result
 
 
+@app.get("/api/tiktok-oembed")
+def tiktok_oembed(url: str):
+    """
+    Proxy TikTok oEmbed API — bypasses CORS restriction on web clients.
+    Returns oEmbed JSON including 'html' field for both video AND photo slideshow posts.
+    """
+    try:
+        r = requests.get(
+            "https://www.tiktok.com/oembed",
+            params={"url": url},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=12,
+        )
+        if not r.ok:
+            raise HTTPException(status_code=r.status_code, detail={"error": f"TikTok oEmbed returned {r.status_code}"})
+        return r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
 @app.post("/api/cache/clear")
 def cache_clear():
     """Clear semua cache — dipakai admin saat debug atau force refresh."""
