@@ -1351,11 +1351,30 @@ def tiktok_oembed(req: OembedRequest):
     """
     Proxy TikTok oEmbed API — bypasses CORS restriction on web clients.
     Returns oEmbed JSON including 'html' field for both video AND photo slideshow posts.
+    Automatically resolves short links (vt.tiktok.com, vm.tiktok.com) before calling oEmbed,
+    because TikTok's oEmbed API rejects short URLs.
     """
+    url = req.url
     try:
+        # Short-link resolution: vt.tiktok.com / vm.tiktok.com → full tiktok.com URL
+        if 'vt.tiktok.com' in url or 'vm.tiktok.com' in url:
+            try:
+                r_head = requests.head(
+                    url,
+                    allow_redirects=True,
+                    timeout=10,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                    },
+                )
+                if r_head.url and 'tiktok.com' in r_head.url:
+                    url = r_head.url
+            except Exception:
+                pass  # Keep original URL if resolution fails
+
         r = requests.get(
             "https://www.tiktok.com/oembed",
-            params={"url": req.url},
+            params={"url": url},
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "application/json",
