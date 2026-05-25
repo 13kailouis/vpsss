@@ -1179,14 +1179,21 @@ def _tikwm(url: str) -> Optional[dict]:
         # play = no watermark H.264 | wmplay = watermark H.264 | hdplay = may be H.265
         # Avoid hdplay on web (H.265 not supported by Chrome) — use wmplay as H.264 fallback
         video_url = data.get('play') or data.get('wmplay') or data.get('hdplay')
-        if not video_url:
-            return None
-        return {
-            'video_url': video_url,
+        # Always extract numeric TikTok ID — lets client skip oEmbed proxy call even when
+        # video_url is unavailable (e.g. geo-blocked), so TikTokEmbed can render embed/v2 faster
+        raw_id = data.get('id')
+        tiktok_id = str(raw_id) if raw_id and str(raw_id).isdigit() else None
+        result = {
             'thumbnail': data.get('cover') or data.get('origin_cover'),
             'title': data.get('title', ''),
             'platform': 'TikTok',
         }
+        if video_url:
+            result['video_url'] = video_url
+        if tiktok_id:
+            result['tiktok_id'] = tiktok_id
+        # Return if we have at least one useful field (video URL or numeric ID)
+        return result if (video_url or tiktok_id) else None
     except Exception:
         return None
 
