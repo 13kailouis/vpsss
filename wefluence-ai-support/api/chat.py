@@ -154,7 +154,7 @@ KNOWLEDGE_BASE_CREATOR = """
 [FACT 5] CARA KLAIM VIEWS: Dashboard -> 'Aksi Cepat' -> 'Klaim Views'. Input jumlah views TERBARU dari sosmed (TikTok/IG/YT). Klaim pertama minimal 500 views. Views bisa DIAKUMULASI dari beberapa video dalam campaign yang sama (contoh: 2 video x 500 views = 1000 views = dibayar). Klaim bisa dilakukan BERULANG.
 [FACT 6] WITHDRAW: Minimal Rp 50.000. Biaya tarik 5% (minimal Rp 6.500). Proses 1-3 hari kerja. Tujuan: Bank (BCA, BNI, BRI, Mandiri, Permata) atau E-Wallet (GoPay, DANA, OVO).
 [FACT 7] KONTEN DITOLAK: Kemungkinan sebab: kode verifikasi tidak ada di caption, konten tidak sesuai brief, kualitas buruk, atau terdeteksi fake views/bot.
-[FACT 8] RULES: DILARANG fake views / suntik views / fake engagement -> BAN PERMANENT. Kode verifikasi (#wefluence WF-XXXX) WAJIB ada di caption. Akun harus PUBLIC.
+[FACT 8] RULES: DILARANG fake views / suntik views / fake engagement -> BAN PERMANENT. Kode verifikasi unik (contoh: a7x2k9m4) WAJIB ada di caption. Akun harus PUBLIC.
 [FACT 9] FITUR PRO (Rp 49k/bulan): Verified Badge, Prioritas Review (lebih cepat), Prioritas WD (batch pertama).
 """
 
