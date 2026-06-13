@@ -25,6 +25,12 @@ services:
       - "8000"
     environment:
       - PYTHONUNBUFFERED=1
+      # Instagram bypass datacenter-IP block. Isi nilainya di file .env
+      # (sebelah docker-compose.yml). Salah satu / dua-duanya:
+      #   IG_SESSIONID=cookie sessionid akun burner IG (gratis, ada risk ban)
+      #   IG_PROXY=http://user:pass@host:port (residential proxy)
+      - IG_SESSIONID=${IG_SESSIONID:-}
+      - IG_PROXY=${IG_PROXY:-}
     networks:
       - wefluence
     logging:

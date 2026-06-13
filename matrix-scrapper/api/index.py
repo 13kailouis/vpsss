@@ -185,6 +185,30 @@ def load_cookies():
         pass
     return cookies
 
+# ============================================================
+# Instagram auth / proxy config
+# IG memblokir request ANONIM dari IP datacenter (VPS) → balas "Login required".
+# Dari IP residensial (laptop) request anonim jalan; dari VPS tidak.
+# Set salah satu (atau dua-duanya) via environment untuk bypass:
+#   IG_SESSIONID = cookie 'sessionid' dari browser yang sudah login IG
+#                  (pakai akun burner — ada risiko ban). Bonus: likes & comments
+#                  ikut terisi (anonim selalu balas 0).
+#   IG_PROXY     = residential/mobile proxy, format http://user:pass@host:port
+#                  (atau pakai SCRAPER_PROXY sebagai alias).
+# ============================================================
+IG_SESSIONID = os.environ.get('IG_SESSIONID', '').strip()
+IG_PROXY = (os.environ.get('IG_PROXY', '') or os.environ.get('SCRAPER_PROXY', '')).strip()
+IG_BASE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+def _build_ig_session():
+    """Session requests dengan sessionid cookie + proxy kalau di-set di env."""
+    s = requests.Session()
+    if IG_SESSIONID:
+        s.cookies.set('sessionid', IG_SESSIONID, domain='.instagram.com')
+    if IG_PROXY:
+        s.proxies.update({'http': IG_PROXY, 'https': IG_PROXY})
+    return s
+
 def _extract_shortcode(url):
     """Extract Instagram shortcode from various URL formats."""
     # Handle /reel/CODE/, /p/CODE/, /tv/CODE/
@@ -194,25 +218,35 @@ def _extract_shortcode(url):
     return None
 
 def _get_instagram_graphql(shortcode):
-    """Fetch Instagram data via GraphQL API (primary method - gets views/play_count)."""
-    session = requests.Session()
+    """Fetch Instagram data via GraphQL API (primary method - gets views/play_count).
 
-    # Visit embed page first to get session cookies (bypasses data center IP blocks on Vercel)
+    Pakai IG_SESSIONID + IG_PROXY (kalau di-set) supaya tetap jalan dari IP
+    datacenter VPS yang biasanya kena 'Login required'.
+    """
+    session = _build_ig_session()
+
+    # Visit embed page first to get session cookies (csrftoken/mid)
     try:
         session.get(f'https://www.instagram.com/p/{shortcode}/embed/captioned/', headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'User-Agent': IG_BASE_UA,
         }, timeout=8)
     except Exception:
         pass
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': IG_BASE_UA,
         'X-IG-App-ID': '936619743392459',
+        'X-ASBD-ID': '129477',
+        'X-IG-WWW-Claim': '0',
         'X-Requested-With': 'XMLHttpRequest',
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
     }
+    # Saat login (sessionid), IG butuh X-CSRFToken yang cocok dengan cookie csrftoken
+    csrf = session.cookies.get('csrftoken')
+    if csrf:
+        headers['X-CSRFToken'] = csrf
 
     variables = json.dumps({'shortcode': shortcode})
     gql_url = 'https://www.instagram.com/graphql/query/'
@@ -221,12 +255,24 @@ def _get_instagram_graphql(shortcode):
         'variables': variables,
     }
 
-    r = session.get(gql_url, headers=headers, params=params, timeout=15)
-    r.raise_for_status()
-    resp_data = r.json()
+    # Retry — IG kadang balas kosong / 429 walau IP & cookie valid
+    media = None
+    last_exc = None
+    for attempt in range(3):
+        try:
+            r = session.get(gql_url, headers=headers, params=params, timeout=15)
+            if r.status_code == 200:
+                media = r.json().get('data', {}).get('xdt_shortcode_media')
+                if media:
+                    break
+        except Exception as e:
+            last_exc = e
+        if attempt < 2:
+            time.sleep(0.6 * (attempt + 1))
 
-    media = resp_data.get('data', {}).get('xdt_shortcode_media')
     if not media:
+        if last_exc:
+            raise last_exc
         return None
 
     data = {
@@ -295,7 +341,7 @@ def get_instagram_custom(url):
             'Accept-Language': 'en-US,en;q=0.9',
         }
 
-        session = requests.Session()
+        session = _build_ig_session()
         response = session.get(url, headers=headers, allow_redirects=True, timeout=10)
 
         html = response.text
