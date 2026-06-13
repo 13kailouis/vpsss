@@ -404,6 +404,18 @@ def get_youtube_custom(url):
             'shares': 0
         }
 
+        # AUTHORITATIVE: player-response videoDetails is tied to THE watched video.
+        # The ytInitialData "...views" text heuristics below can accidentally grab a
+        # recommended video's view count from the sidebar (e.g. a 63M clip) — this is
+        # especially likely when login cookies reorder the page layout. Read the real
+        # video's viewCount/author here FIRST so the heuristics only act as fallback.
+        vd_views = re.search(r'"videoDetails":\{.*?"viewCount":"(\d+)"', html, re.DOTALL)
+        if vd_views:
+            data['views'] = int(vd_views.group(1))
+        vd_author = re.search(r'"videoDetails":\{.*?"author":"(.*?)"', html, re.DOTALL)
+        if vd_author and vd_author.group(1):
+            data['uploader'] = vd_author.group(1)
+
         # 1. Try extracting ytInitialData (most reliable for standard pages)
         try:
              # Use DOTALL (. matches newline) in case of pretty printing
@@ -422,12 +434,15 @@ def get_youtube_custom(url):
             
             if json_str:
                 
-                # Views
-                v_match = re.search(r'"viewCount":"(\d+)"', json_str)
-                if not v_match:
-                    v_match = re.search(r'"simpleText":"([0-9,.]+[KMB]?)\s*views"', json_str) # Catch "10K views"
-                if v_match:
-                    data['views'] = parse_count(v_match.group(1))
+                # Views — FALLBACK ONLY. Authoritative videoDetails.viewCount is read
+                # above; only use ytInitialData heuristics if that failed (views still 0),
+                # because the "...views" simpleText can match a recommended sidebar video.
+                if data['views'] == 0:
+                    v_match = re.search(r'"viewCount":"(\d+)"', json_str)
+                    if not v_match:
+                        v_match = re.search(r'"simpleText":"([0-9,.]+[KMB]?)\s*views"', json_str) # Catch "10K views"
+                    if v_match:
+                        data['views'] = parse_count(v_match.group(1))
                 
                 # Title
                 t_match = re.search(r'"title":\s*{\s*"runs":\s*\[\s*{\s*"text":"(.*?)"', json_str)
