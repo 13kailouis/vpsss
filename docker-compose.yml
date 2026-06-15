@@ -26,11 +26,19 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       # Instagram bypass datacenter-IP block. Isi nilainya di file .env
-      # (sebelah docker-compose.yml). Salah satu / dua-duanya:
-      #   IG_SESSIONID=cookie sessionid akun burner IG (gratis, ada risk ban)
-      #   IG_PROXY=http://user:pass@host:port (residential proxy)
+      # (sebelah docker-compose.yml).
+      #   IG_SESSIONID = cookie sessionid akun burner IG. BISA BANYAK (pisah koma)
+      #                  untuk dirotasi otomatis → sebar beban, hindari flag.
+      #                  contoh: IG_SESSIONID=sid_akun1,sid_akun2,sid_akun3
+      #   IG_PROXY     = http://user:pass@host:port (residential proxy, opsional)
+      # Throttle anti-bot (opsional, default aman):
+      #   IG_MAX_CONCURRENCY = request IG bersamaan (default 2)
+      #   IG_MIN_DELAY / IG_MAX_DELAY = jeda acak antar request detik (default 0.8/2.5)
       - IG_SESSIONID=${IG_SESSIONID:-}
       - IG_PROXY=${IG_PROXY:-}
+      - IG_MAX_CONCURRENCY=${IG_MAX_CONCURRENCY:-2}
+      - IG_MIN_DELAY=${IG_MIN_DELAY:-0.8}
+      - IG_MAX_DELAY=${IG_MAX_DELAY:-2.5}
     networks:
       - wefluence
     logging:

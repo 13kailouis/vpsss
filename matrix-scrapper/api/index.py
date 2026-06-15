@@ -5,6 +5,7 @@ import traceback
 import os
 import time
 import threading
+import random
 from urllib.parse import parse_qs, urlparse
 import html as html_lib
 from typing import List, Optional
@@ -196,15 +197,34 @@ def load_cookies():
 #   IG_PROXY     = residential/mobile proxy, format http://user:pass@host:port
 #                  (atau pakai SCRAPER_PROXY sebagai alias).
 # ============================================================
-IG_SESSIONID = os.environ.get('IG_SESSIONID', '').strip()
+# IG_SESSIONID bisa berisi BANYAK sessionid (pisah koma / baris / spasi) untuk
+# dirotasi otomatis → beban scraping tersebar ke banyak akun burner supaya tiap
+# akun tidak kena flag "perilaku otomatis" IG. IG_SESSIONIDS = alias.
+def _parse_pool(raw):
+    return [x.strip() for x in re.split(r'[\s,]+', raw or '') if x.strip()]
+
+IG_SESSION_POOL = _parse_pool(os.environ.get('IG_SESSIONID', '') or os.environ.get('IG_SESSIONIDS', ''))
 IG_PROXY = (os.environ.get('IG_PROXY', '') or os.environ.get('SCRAPER_PROXY', '')).strip()
 IG_BASE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-def _build_ig_session():
-    """Session requests dengan sessionid cookie + proxy kalau di-set di env."""
+# Throttle anti-bot: batasi jumlah request IG yang jalan BERSAMAAN + jeda acak.
+# Tanpa ini, bulk-scan nembak puluhan request login sekaligus dari 1 IP → IG
+# langsung flag akunnya (scraping_warning). Bisa di-tune via env.
+IG_MAX_CONCURRENCY = max(1, int(os.environ.get('IG_MAX_CONCURRENCY', '2')))
+IG_MIN_DELAY = float(os.environ.get('IG_MIN_DELAY', '0.8'))
+IG_MAX_DELAY = float(os.environ.get('IG_MAX_DELAY', '2.5'))
+_IG_SEM = threading.Semaphore(IG_MAX_CONCURRENCY)
+
+def _pick_ig_sessionid():
+    """Pilih 1 sessionid acak dari pool (rotasi akun). '' kalau pool kosong."""
+    return random.choice(IG_SESSION_POOL) if IG_SESSION_POOL else ''
+
+def _build_ig_session(sessionid=None):
+    """Session requests dengan sessionid (dari param/pool) + proxy kalau di-set."""
     s = requests.Session()
-    if IG_SESSIONID:
-        s.cookies.set('sessionid', IG_SESSIONID, domain='.instagram.com')
+    sid = sessionid if sessionid is not None else _pick_ig_sessionid()
+    if sid:
+        s.cookies.set('sessionid', sid, domain='.instagram.com')
     if IG_PROXY:
         s.proxies.update({'http': IG_PROXY, 'https': IG_PROXY})
     return s
@@ -217,13 +237,13 @@ def _extract_shortcode(url):
         return match.group(2)
     return None
 
-def _get_instagram_graphql(shortcode):
+def _get_instagram_graphql(shortcode, sessionid=None):
     """Fetch Instagram data via GraphQL API (primary method - gets views/play_count).
 
-    Pakai IG_SESSIONID + IG_PROXY (kalau di-set) supaya tetap jalan dari IP
-    datacenter VPS yang biasanya kena 'Login required'.
+    Pakai sessionid (dari pool) + IG_PROXY (kalau di-set) supaya tetap jalan dari
+    IP datacenter VPS yang biasanya kena 'Login required'.
     """
-    session = _build_ig_session()
+    session = _build_ig_session(sessionid)
 
     # Visit embed page first to get session cookies (csrftoken/mid)
     try:
@@ -323,72 +343,79 @@ def get_instagram_custom(url):
         'shares': 0
     }
 
-    # Method 1: GraphQL API (best for views)
-    shortcode = _extract_shortcode(url)
-    if shortcode:
+    # Throttle + rotasi akun: 1 sessionid acak per URL, batasi konkurensi global,
+    # kasih jeda acak supaya pola request tidak terlihat seperti bot.
+    sid = _pick_ig_sessionid()
+    with _IG_SEM:
+        if IG_SESSION_POOL:
+            time.sleep(random.uniform(IG_MIN_DELAY, IG_MAX_DELAY))
+
+        # Method 1: GraphQL API (best for views)
+        shortcode = _extract_shortcode(url)
+        if shortcode:
+            try:
+                gql_data = _get_instagram_graphql(shortcode, sid)
+                if gql_data and (gql_data.get('views', 0) > 0 or gql_data.get('likes', 0) > 0):
+                    return gql_data
+            except Exception:
+                pass
+
+        # Method 2: Direct HTML scraping fallback (last resort)
         try:
-            gql_data = _get_instagram_graphql(shortcode)
-            if gql_data and (gql_data.get('views', 0) > 0 or gql_data.get('likes', 0) > 0):
-                return gql_data
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+
+            session = _build_ig_session(sid)
+            response = session.get(url, headers=headers, allow_redirects=True, timeout=10)
+
+            html = response.text
+
+            # Try finding JSON data in HTML
+            view_patterns = [r'"video_view_count":\s*(\d+)', r'"video_play_count":\s*(\d+)', r'"play_count":\s*(\d+)', r'"view_count":\s*(\d+)']
+            for p in view_patterns:
+                matches = re.findall(p, html)
+                if matches:
+                    data['views'] = max([int(v) for v in matches])
+                    break
+
+            # Meta Tags fallback for Likes/Comments
+            meta_desc = re.search(r'<meta\s+(?:property="og:description"|name="description")\s+content="([^"]+)"', html)
+
+            if meta_desc:
+                desc_text = meta_desc.group(1)
+
+                l_match = re.search(r'([0-9,.]+[KMB]?)\s+likes', desc_text, re.IGNORECASE)
+                if l_match:
+                    data['likes'] = parse_count(l_match.group(1))
+
+                c_match = re.search(r'([0-9,.]+[KMB]?)\s+comments', desc_text, re.IGNORECASE)
+                if c_match:
+                    data['comments'] = parse_count(c_match.group(1))
+
+            if data['likes'] == 0:
+                like_patterns = [r'"like_count":\s*(\d+)', r'"edge_media_preview_like":\s*{\s*"count":\s*(\d+)']
+                for p in like_patterns:
+                    matches = re.findall(p, html)
+                    if matches:
+                        data['likes'] = max([int(v) for v in matches])
+                        break
+
+            if data['comments'] == 0:
+                comment_patterns = [r'"edge_media_to_comment":\s*{\s*"count":\s*(\d+)', r'"comment_count":\s*(\d+)']
+                for p in comment_patterns:
+                    matches = re.findall(p, html)
+                    if matches:
+                        data['comments'] = max([int(v) for v in matches])
+                        break
+
+            if data['views'] > 0 or data['likes'] > 0 or data['comments'] > 0:
+                return data
+
         except Exception:
             pass
-
-    # Method 2: Direct HTML scraping fallback (last resort)
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-
-        session = _build_ig_session()
-        response = session.get(url, headers=headers, allow_redirects=True, timeout=10)
-
-        html = response.text
-
-        # Try finding JSON data in HTML
-        view_patterns = [r'"video_view_count":\s*(\d+)', r'"video_play_count":\s*(\d+)', r'"play_count":\s*(\d+)', r'"view_count":\s*(\d+)']
-        for p in view_patterns:
-            matches = re.findall(p, html)
-            if matches:
-                data['views'] = max([int(v) for v in matches])
-                break
-
-        # Meta Tags fallback for Likes/Comments
-        meta_desc = re.search(r'<meta\s+(?:property="og:description"|name="description")\s+content="([^"]+)"', html)
-
-        if meta_desc:
-            desc_text = meta_desc.group(1)
-
-            l_match = re.search(r'([0-9,.]+[KMB]?)\s+likes', desc_text, re.IGNORECASE)
-            if l_match:
-                data['likes'] = parse_count(l_match.group(1))
-
-            c_match = re.search(r'([0-9,.]+[KMB]?)\s+comments', desc_text, re.IGNORECASE)
-            if c_match:
-                data['comments'] = parse_count(c_match.group(1))
-
-        if data['likes'] == 0:
-            like_patterns = [r'"like_count":\s*(\d+)', r'"edge_media_preview_like":\s*{\s*"count":\s*(\d+)']
-            for p in like_patterns:
-                matches = re.findall(p, html)
-                if matches:
-                    data['likes'] = max([int(v) for v in matches])
-                    break
-
-        if data['comments'] == 0:
-            comment_patterns = [r'"edge_media_to_comment":\s*{\s*"count":\s*(\d+)', r'"comment_count":\s*(\d+)']
-            for p in comment_patterns:
-                matches = re.findall(p, html)
-                if matches:
-                    data['comments'] = max([int(v) for v in matches])
-                    break
-
-        if data['views'] > 0 or data['likes'] > 0 or data['comments'] > 0:
-            return data
-
-    except Exception:
-        pass
 
     return None
 
