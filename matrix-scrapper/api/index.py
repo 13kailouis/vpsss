@@ -6,6 +6,7 @@ import os
 import time
 import threading
 import random
+from contextlib import nullcontext
 from urllib.parse import parse_qs, urlparse
 import html as html_lib
 from typing import List, Optional
@@ -332,7 +333,7 @@ def _get_instagram_graphql(shortcode, sessionid=None):
 
     return data
 
-def get_instagram_custom(url):
+def get_instagram_custom(url, interactive=False):
     data = {
         'platform': 'Instagram',
         'uploader': 'Unknown',
@@ -343,11 +344,13 @@ def get_instagram_custom(url):
         'shares': 0
     }
 
-    # Throttle + rotasi akun: 1 sessionid acak per URL, batasi konkurensi global,
-    # kasih jeda acak supaya pola request tidak terlihat seperti bot.
+    # Throttle + rotasi akun: 1 sessionid acak per URL.
+    # interactive=True (scan 1 URL dari user) → jalur cepat: tanpa semaphore & tanpa
+    #   jeda, biar creator tidak nunggu lama (risiko flag kecil krn cuma 1 request).
+    # interactive=False (bulk admin) → throttle penuh: batasi konkurensi + jeda acak.
     sid = _pick_ig_sessionid()
-    with _IG_SEM:
-        if IG_SESSION_POOL:
+    with (nullcontext() if interactive else _IG_SEM):
+        if not interactive and IG_SESSION_POOL:
             time.sleep(random.uniform(IG_MIN_DELAY, IG_MAX_DELAY))
 
         # Method 1: GraphQL API (best for views)
@@ -1151,8 +1154,11 @@ def get_capcut_custom(url):
     return None
 
 
-def process_single_url(url):
-    """Refactored helper to process a single URL"""
+def process_single_url(url, interactive=False):
+    """Refactored helper to process a single URL.
+
+    interactive=True → request 1 URL (scan-tunggal user) → IG pakai jalur cepat.
+    """
     url = url.strip()
     if not url: return None
 
@@ -1166,9 +1172,9 @@ def process_single_url(url):
         result = get_tiktok_custom(url)
         if not result:
             result = get_universal_stats(url)
-    
+
     elif "instagram.com" in url:
-        result = get_instagram_custom(url)
+        result = get_instagram_custom(url, interactive=interactive)
         # DISABLE yt-dlp fallback for Instagram
         if not result:
              return {'error': 'Instagram scan failed (Login required)'}
@@ -1263,10 +1269,13 @@ def scrape(req: ScrapeRequest):
             urls_to_scrape.append(u)
 
     # 2) Scrape hanya yang belum di-cache
+    # interactive = cuma 1 URL yang benar-benar di-scrape (scan-tunggal user) →
+    # IG lewat jalur cepat tanpa throttle. >1 URL = bulk → throttle penuh.
     if urls_to_scrape:
+        interactive = (len(urls_to_scrape) == 1)
         try:
             with ThreadPoolExecutor(max_workers=30) as executor:
-                future_to_url = {executor.submit(process_single_url, u): u for u in urls_to_scrape}
+                future_to_url = {executor.submit(process_single_url, u, interactive): u for u in urls_to_scrape}
                 for future in future_to_url:
                     u = future_to_url[future]
                     try:
