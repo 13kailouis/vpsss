@@ -617,6 +617,12 @@ def get_universal_stats(url):
         'skip_download': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'nocheckcertificate': True,
+        # vt.tiktok.com sering di-blackhole IP datacenter → connect timeout. Default
+        # yt-dlp 20s = buang 20 detik & numpuk thread per gagal. 8s: gagal cepat →
+        # retry lebih gesit, thread nggak menumpuk. Batasi retry internal yt-dlp juga.
+        'socket_timeout': 8,
+        'extractor_retries': 1,
+        'retries': 1,
     }
     
     try:
