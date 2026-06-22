@@ -1066,6 +1066,10 @@ app.add_middleware(
 class VerifyRequest(BaseModel):
     url: str
     expectedCode: str
+    # Opt-in: kalau True, sertakan teks caption di respons (dipakai AI moderasi
+    # biar bisa cek kesesuaian brief/larangan). Default False -> perilaku LAMA
+    # tidak berubah (caption tetap disembunyikan dari pemanggil biasa/creator).
+    includeCaption: bool = False
 
 
 @app.get("/")
@@ -1110,6 +1114,7 @@ def verify(req: VerifyRequest):
             'message': 'Verifikasi manual diperlukan (Scraper Skipped).',
             'debug_caption': f"SKIP: {debug_src}",
             'manual_check': True,
+            **({'caption': caption} if req.includeCaption else {}),
         }
 
     normalized_caption = caption.upper()
@@ -1129,10 +1134,12 @@ def verify(req: VerifyRequest):
             'message': 'Verifikasi manual diperlukan (Possibly Truncated).',
             'debug_caption': f"TRUNCATED: {debug_src}",
             'manual_check': True,
+            **({'caption': caption} if req.includeCaption else {}),
         }
 
     return {
         'valid': is_valid,
         'message': 'Kode ditemukan!' if is_valid else f'Kode {code} tidak ditemukan di caption. Mohon edit caption di platform terkait lalu submit ulang.',
         'debug_caption': f"Src:{debug_src}" if not is_valid else 'HIDDEN',
+        **({'caption': caption} if req.includeCaption else {}),
     }
