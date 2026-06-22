@@ -3,6 +3,9 @@ import requests
 import re
 from urllib.parse import urlparse, parse_qs, quote
 import random
+import os
+import time
+import threading
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -1063,6 +1066,40 @@ app.add_middleware(
 )
 
 
+# ── Cache hasil verify (in-memory, TTL). HANYA simpan hasil VALID (kode ketemu /
+# manual). 'Kode tidak ditemukan' & scraper-skip TIDAK di-cache → creator yang
+# baru edit caption langsung dapat cek fresh, & item invalid tetap di-cek ulang.
+# Mengurangi scrape-ulang berat saat admin refresh layar moderasi berkali-kali.
+VERIFY_CACHE_TTL = int(os.environ.get('VERIFY_CACHE_TTL', '600'))  # 10 menit
+_verify_cache = {}
+_verify_cache_lock = threading.Lock()
+
+
+def _vcache_key(url, code, inc):
+    return f"{url}\x00{code}\x00{int(inc)}"
+
+
+def _vcache_get(key):
+    with _verify_cache_lock:
+        e = _verify_cache.get(key)
+        if not e:
+            return None
+        ts, data = e
+        if time.time() - ts > VERIFY_CACHE_TTL:
+            _verify_cache.pop(key, None)
+            return None
+        return data
+
+
+def _vcache_set(key, data):
+    with _verify_cache_lock:
+        _verify_cache[key] = (time.time(), data)
+        if len(_verify_cache) > 5000:  # cleanup oportunistik
+            now = time.time()
+            for k in [k for k, (t, _) in _verify_cache.items() if now - t > VERIFY_CACHE_TTL]:
+                _verify_cache.pop(k, None)
+
+
 class VerifyRequest(BaseModel):
     url: str
     expectedCode: str
@@ -1087,6 +1124,12 @@ def verify(req: VerifyRequest):
             status_code=400,
             detail={"error": "Missing url or expectedCode", "valid": False},
         )
+
+    # Cache hit → balikin instan (hemat scrape ulang saat admin refresh berkali2)
+    _ck = _vcache_key(url, code, bool(req.includeCaption))
+    _hit = _vcache_get(_ck)
+    if _hit is not None:
+        return _hit
 
     url_lower = url.lower()
     caption = None
@@ -1129,17 +1172,24 @@ def verify(req: VerifyRequest):
         "CapCut:MetaOG",
     ]
     if not is_valid and debug_src in risky_sources:
-        return {
+        result = {
             'valid': True,
             'message': 'Verifikasi manual diperlukan (Possibly Truncated).',
             'debug_caption': f"TRUNCATED: {debug_src}",
             'manual_check': True,
             **({'caption': caption} if req.includeCaption else {}),
         }
+        _vcache_set(_ck, result)
+        return result
 
-    return {
+    result = {
         'valid': is_valid,
         'message': 'Kode ditemukan!' if is_valid else f'Kode {code} tidak ditemukan di caption. Mohon edit caption di platform terkait lalu submit ulang.',
         'debug_caption': f"Src:{debug_src}" if not is_valid else 'HIDDEN',
         **({'caption': caption} if req.includeCaption else {}),
     }
+    # Cache HANYA yang valid (kode ketemu). 'Tidak ketemu' jangan di-cache biar
+    # creator yang baru perbaiki caption langsung dapat hasil fresh.
+    if is_valid:
+        _vcache_set(_ck, result)
+    return result
