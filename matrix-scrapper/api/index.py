@@ -23,6 +23,11 @@ _scrape_cache: dict = {}  # { url: (timestamp, result_dict) }
 _cache_lock = threading.Lock()
 _last_cleanup_ts = 0.0
 
+# YouTube Data API v3 (resmi) — kalau diisi, semua link YT lewat sini duluan:
+# 1 panggilan = 50 video, ~0.3s, tanpa bot-check, angka exact. Scraping HTML
+# hanya jadi fallback kalau key kosong / kuota habis / API error.
+YT_API_KEY = os.environ.get('YT_API_KEY', '').strip()
+
 def _cache_get(url: str):
     """Return cached result kalau masih fresh, else None."""
     now = time.time()
@@ -512,6 +517,63 @@ def _youtube_innertube_details(video_id):
     except Exception:
         pass
     return None
+
+def _youtube_api_batch(urls):
+    """Ambil statistik YT via Data API v3 resmi — batch sampai 50 videoId per panggilan.
+
+    Return {url: result_dict}. Tiga kemungkinan per URL:
+    - ada di respons API        → data lengkap (views/likes/comments exact)
+    - di-query tapi tidak ada   → error eksplisit (private/dihapus) — JANGAN
+                                  jatuh ke scraper: pasti gagal juga, buang 2-8s
+    - tidak sempat di-query     → tidak dimasukkan → jatuh ke jalur scraping
+      (id tak terparse, atau panggilan API gagal: kuota habis/key salah/network)
+    """
+    url_to_id = {}
+    for u in urls:
+        vid = _extract_youtube_id(u)
+        if vid:
+            url_to_id[u] = vid
+    if not url_to_id:
+        return {}
+
+    unique_ids = list(dict.fromkeys(url_to_id.values()))
+    found = {}
+    queried_ok = set()  # id yang masuk panggilan API sukses (HTTP 200)
+    for i in range(0, len(unique_ids), 50):
+        chunk = unique_ids[i:i + 50]
+        try:
+            resp = requests.get(
+                'https://www.googleapis.com/youtube/v3/videos',
+                params={'part': 'statistics,snippet', 'id': ','.join(chunk), 'key': YT_API_KEY},
+                timeout=8,
+            )
+            if resp.status_code != 200:
+                break  # kuota/key bermasalah — chunk ini & sisanya biar scraping
+            queried_ok.update(chunk)
+            for item in resp.json().get('items', []):
+                stats = item.get('statistics') or {}
+                snip = item.get('snippet') or {}
+                found[item.get('id')] = {
+                    'platform': 'YouTube',
+                    'uploader': snip.get('channelTitle') or 'Unknown',
+                    'title': snip.get('title') or 'YouTube Video',
+                    'views': int(stats.get('viewCount') or 0),
+                    # likeCount bisa disembunyikan kreator → field hilang → 0
+                    'likes': int(stats.get('likeCount') or 0),
+                    'comments': int(stats.get('commentCount') or 0),
+                    'shares': 0,
+                    'source': 'youtube_data_api',
+                }
+        except Exception:
+            break
+
+    out = {}
+    for u, vid in url_to_id.items():
+        if vid in found:
+            out[u] = found[vid]
+        elif vid in queried_ok:
+            out[u] = {'error': 'Video tidak ditemukan di YouTube (private/dihapus?)'}
+    return out
 
 def get_youtube_custom(url):
     try:
@@ -1343,7 +1405,22 @@ def scrape(req: ScrapeRequest):
         else:
             urls_to_scrape.append(u)
 
-    # 2) Scrape hanya yang belum di-cache
+    # 2) YouTube → Data API resmi duluan (batch 50 video / 1 panggilan, ~0.3s,
+    #    tanpa bot-check). URL YT yang gagal lewat API (key kosong / kuota habis)
+    #    tetap jatuh ke jalur scraping di bawah.
+    if urls_to_scrape and YT_API_KEY:
+        yt_urls = [u for u in urls_to_scrape if 'youtube.com' in u or 'youtu.be' in u]
+        if yt_urls:
+            api_results = _youtube_api_batch(yt_urls)
+            for u, data in api_results.items():
+                if 'error' in data:
+                    results[u] = {'error': 'Failed to fetch', 'details': data['error']}
+                else:
+                    results[u] = data
+                    _cache_set(u, data)
+            urls_to_scrape = [u for u in urls_to_scrape if u not in api_results]
+
+    # 3) Scrape hanya yang belum di-cache
     # interactive = cuma 1 URL yang benar-benar di-scrape (scan-tunggal user) →
     # IG lewat jalur cepat tanpa throttle. >1 URL = bulk → throttle penuh.
     if urls_to_scrape:
