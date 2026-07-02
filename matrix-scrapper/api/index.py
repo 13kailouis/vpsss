@@ -28,23 +28,37 @@ _last_cleanup_ts = 0.0
 # hanya jadi fallback kalau key kosong / kuota habis / API error.
 YT_API_KEY = os.environ.get('YT_API_KEY', '').strip()
 
-def _cache_get(url: str):
-    """Return cached result kalau masih fresh, else None."""
+# Error juga di-cache tapi SEBENTAR: menyerap badai auto-retry klien (3x jeda
+# 1.5s) tanpa menghajar platform/sessionid yang lagi bermasalah. 30 detik saja —
+# saat manusia klik "Ulangi Gagal" (biasanya lebih lama dari itu), cache sudah
+# lewat dan percobaannya beneran.
+NEG_CACHE_TTL_SECONDS = int(os.environ.get('SCRAPE_NEG_CACHE_TTL', '30'))
+
+def _cache_get(url: str, allow_negative: bool = True):
+    """Return cached result kalau masih fresh, else None.
+
+    allow_negative=False → entry error tidak dipakai (request scan-tunggal user:
+    klik "Ulangi" harus benar-benar mencoba lagi, bukan disuguhi error kemarin).
+    """
     now = time.time()
     with _cache_lock:
         entry = _scrape_cache.get(url)
         if not entry:
             return None
         ts, data = entry
-        if now - ts > CACHE_TTL_SECONDS:
+        is_error = isinstance(data, dict) and 'error' in data
+        ttl = NEG_CACHE_TTL_SECONDS if is_error else CACHE_TTL_SECONDS
+        if now - ts > ttl:
             # Expired — hapus
             _scrape_cache.pop(url, None)
+            return None
+        if is_error and not allow_negative:
             return None
         return data
 
 def _cache_set(url: str, data: dict):
-    """Simpan hasil ke cache — hanya kalau bukan error."""
-    if not data or 'error' in data:
+    """Simpan hasil ke cache — error ikut disimpan dgn TTL pendek (lihat _cache_get)."""
+    if not data:
         return
     global _last_cleanup_ts
     now = time.time()
@@ -221,9 +235,56 @@ IG_MIN_DELAY = float(os.environ.get('IG_MIN_DELAY', '0.8'))
 IG_MAX_DELAY = float(os.environ.get('IG_MAX_DELAY', '2.5'))
 _IG_SEM = threading.Semaphore(IG_MAX_CONCURRENCY)
 
+# Health-tracking pool: sessionid yang gagal beruntun di-"bench" (diistirahatkan)
+# sementara, supaya random.choice tidak terus-terusan memilih akun yang sudah
+# mati/kena flag — tiap pilihan salah = buang belasan detik per URL.
+IG_SID_MAX_STRIKES = max(1, int(os.environ.get('IG_SID_MAX_STRIKES', '3')))
+IG_SID_BENCH_SECONDS = int(os.environ.get('IG_SID_BENCH_SECONDS', '1800'))  # 30 menit
+_IG_SID_STRIKES: dict = {}      # sid -> jumlah gagal beruntun
+_IG_SID_BENCH_UNTIL: dict = {}  # sid -> timestamp boleh dipakai lagi
+_IG_SID_LOCK = threading.Lock()
+
+def _ig_alive_sids():
+    now = time.time()
+    with _IG_SID_LOCK:
+        return [s for s in IG_SESSION_POOL if _IG_SID_BENCH_UNTIL.get(s, 0) <= now]
+
 def _pick_ig_sessionid():
-    """Pilih 1 sessionid acak dari pool (rotasi akun). '' kalau pool kosong."""
+    """Pilih 1 sessionid acak dari pool — prioritas yang tidak sedang di-bench.
+    Semua benched → tetap pilih acak (siapa tahu sudah pulih). '' kalau kosong."""
+    alive = _ig_alive_sids()
+    if alive:
+        return random.choice(alive)
     return random.choice(IG_SESSION_POOL) if IG_SESSION_POOL else ''
+
+def _ig_sid_report(sid, ok):
+    """Lapor hasil pemakaian sessionid. Sukses → reset strike & lepas bench.
+    Gagal → tambah strike; capai batas → bench selama IG_SID_BENCH_SECONDS."""
+    if not sid:
+        return
+    with _IG_SID_LOCK:
+        if ok:
+            _IG_SID_STRIKES[sid] = 0
+            _IG_SID_BENCH_UNTIL.pop(sid, None)
+        else:
+            n = _IG_SID_STRIKES.get(sid, 0) + 1
+            if n >= IG_SID_MAX_STRIKES:
+                _IG_SID_BENCH_UNTIL[sid] = time.time() + IG_SID_BENCH_SECONDS
+                _IG_SID_STRIKES[sid] = 0  # siklus strike baru setelah bench
+            else:
+                _IG_SID_STRIKES[sid] = n
+
+def _ig_pool_stats():
+    """Untuk endpoint health — admin bisa lihat kondisi pool tanpa buka log."""
+    now = time.time()
+    with _IG_SID_LOCK:
+        benched = sum(1 for s in IG_SESSION_POOL if _IG_SID_BENCH_UNTIL.get(s, 0) > now)
+    return {
+        'total': len(IG_SESSION_POOL),
+        'benched': benched,
+        'alive': len(IG_SESSION_POOL) - benched,
+        'proxy': bool(IG_PROXY),
+    }
 
 def _build_ig_session(sessionid=None):
     """Session requests dengan sessionid (dari param/pool) + proxy kalau di-set."""
@@ -248,53 +309,66 @@ def _get_instagram_graphql(shortcode, sessionid=None):
 
     Pakai sessionid (dari pool) + IG_PROXY (kalau di-set) supaya tetap jalan dari
     IP datacenter VPS yang biasanya kena 'Login required'.
+
+    Retry pakai sessionid BERBEDA: gagal biasanya berarti akun itu mati/kena
+    flag — mengulang dengan akun yang sama cuma buang waktu. Tiap hasil
+    dilaporkan ke health-tracker pool (bench akun yang gagal beruntun).
     """
-    session = _build_ig_session(sessionid)
-
-    # Visit embed page first to get session cookies (csrftoken/mid)
-    try:
-        session.get(f'https://www.instagram.com/p/{shortcode}/embed/captioned/', headers={
-            'User-Agent': IG_BASE_UA,
-        }, timeout=8)
-    except Exception:
-        pass
-
-    headers = {
-        'User-Agent': IG_BASE_UA,
-        'X-IG-App-ID': '936619743392459',
-        'X-ASBD-ID': '129477',
-        'X-IG-WWW-Claim': '0',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
-    }
-    # Saat login (sessionid), IG butuh X-CSRFToken yang cocok dengan cookie csrftoken
-    csrf = session.cookies.get('csrftoken')
-    if csrf:
-        headers['X-CSRFToken'] = csrf
-
-    variables = json.dumps({'shortcode': shortcode})
     gql_url = 'https://www.instagram.com/graphql/query/'
     params = {
         'doc_id': '8845758582119845',
-        'variables': variables,
+        'variables': json.dumps({'shortcode': shortcode}),
     }
 
-    # Retry — IG kadang balas kosong / 429 walau IP & cookie valid
     media = None
     last_exc = None
-    for attempt in range(3):
+    tried = set()
+    for attempt in range(2):
+        # Attempt pertama pakai sid pemberian caller; berikutnya rotasi ke sid lain
+        sid = sessionid if (attempt == 0 and sessionid is not None) else _pick_ig_sessionid()
+        if attempt > 0 and sid in tried:
+            fresh = [s for s in _ig_alive_sids() if s not in tried]
+            if fresh:
+                sid = random.choice(fresh)
+        tried.add(sid)
+
+        session = _build_ig_session(sid)
+
+        # Visit embed page first to get session cookies (csrftoken/mid)
         try:
-            r = session.get(gql_url, headers=headers, params=params, timeout=15)
+            session.get(f'https://www.instagram.com/p/{shortcode}/embed/captioned/', headers={
+                'User-Agent': IG_BASE_UA,
+            }, timeout=4)
+        except Exception:
+            pass
+
+        headers = {
+            'User-Agent': IG_BASE_UA,
+            'X-IG-App-ID': '936619743392459',
+            'X-ASBD-ID': '129477',
+            'X-IG-WWW-Claim': '0',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
+        }
+        # Saat login (sessionid), IG butuh X-CSRFToken yang cocok dengan cookie csrftoken
+        csrf = session.cookies.get('csrftoken')
+        if csrf:
+            headers['X-CSRFToken'] = csrf
+
+        try:
+            r = session.get(gql_url, headers=headers, params=params, timeout=8)
             if r.status_code == 200:
                 media = r.json().get('data', {}).get('xdt_shortcode_media')
-                if media:
-                    break
         except Exception as e:
             last_exc = e
-        if attempt < 2:
-            time.sleep(0.6 * (attempt + 1))
+
+        _ig_sid_report(sid, bool(media))
+        if media:
+            break
+        if attempt == 0:
+            time.sleep(0.6)
 
     if not media:
         if last_exc:
@@ -377,7 +451,7 @@ def get_instagram_custom(url, interactive=False):
             }
 
             session = _build_ig_session(sid)
-            response = session.get(url, headers=headers, allow_redirects=True, timeout=10)
+            response = session.get(url, headers=headers, allow_redirects=True, timeout=8)
 
             html = response.text
 
@@ -1361,7 +1435,8 @@ class ScrapeRequest(BaseModel):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "matrix-scrapper", "cache": _cache_stats()}
+    return {"status": "ok", "service": "matrix-scrapper", "cache": _cache_stats(),
+            "ig_pool": _ig_pool_stats()}
 
 
 @app.post("/api/cache/clear")
@@ -1395,11 +1470,15 @@ def scrape(req: ScrapeRequest):
             seen.add(u)
             deduped_urls.append(u)
 
-    # 1) Cek cache dulu — URL yang sudah ada di cache tidak perlu scrape ulang
+    # 1) Cek cache dulu — URL yang sudah ada di cache tidak perlu scrape ulang.
+    # Scan-tunggal (1 URL) = aksi manual user → error lama JANGAN disajikan dari
+    # cache; klik "Ulangi" harus benar-benar mencoba lagi. Bulk tetap boleh
+    # kena negative-cache biar retry beruntun klien tidak menghajar platform.
     results = {}
     urls_to_scrape = []
+    allow_negative = len(deduped_urls) > 1
     for u in deduped_urls:
-        cached = _cache_get(u)
+        cached = _cache_get(u, allow_negative=allow_negative)
         if cached is not None:
             results[u] = cached
         else:
@@ -1417,7 +1496,7 @@ def scrape(req: ScrapeRequest):
                     results[u] = {'error': 'Failed to fetch', 'details': data['error']}
                 else:
                     results[u] = data
-                    _cache_set(u, data)
+                _cache_set(u, results[u])
             urls_to_scrape = [u for u in urls_to_scrape if u not in api_results]
 
     # 3) Scrape hanya yang belum di-cache
@@ -1434,12 +1513,12 @@ def scrape(req: ScrapeRequest):
                         data = future.result()
                         if data and 'error' not in data:
                             results[u] = data
-                            _cache_set(u, data)  # simpan ke cache
                         else:
                             results[u] = {
                                 'error': 'Failed to fetch',
                                 'details': data.get('error') if data else 'Unknown',
                             }
+                        _cache_set(u, results[u])  # sukses TTL penuh, error TTL pendek
                     except Exception as e:
                         results[u] = {'error': str(e)}
         except Exception:
