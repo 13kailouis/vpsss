@@ -443,8 +443,82 @@ def parse_count(text_val):
     except:
         return 0
 
+def _extract_youtube_id(url):
+    """Ambil videoId dari semua bentuk URL YouTube (shorts/watch/youtu.be/live/embed)."""
+    try:
+        for marker in ('/shorts/', '/live/', '/embed/', 'youtu.be/'):
+            if marker in url:
+                cand = url.split(marker)[1]
+                cand = re.split(r'[?&#/]', cand)[0]
+                if cand:
+                    return cand
+        qs = parse_qs(urlparse(url).query)
+        if qs.get('v') and qs['v'][0]:
+            return qs['v'][0]
+    except Exception:
+        pass
+    return None
+
+def _find_player_response(html, video_id):
+    """Parse ytInitialPlayerResponse sebagai JSON beneran, dan HANYA terima kalau
+    videoDetails.videoId == video yang diminta.
+
+    Regex lama ("videoDetails":\\{.*?"viewCount") bisa "bocor" keluar objek: saat
+    YouTube menyajikan halaman tanpa viewCount (bot-check di IP datacenter VPS),
+    .*? DOTALL merayap ribuan karakter dan menangkap viewCount milik video lain.
+    raw_decode berhenti tepat di akhir satu objek JSON, jadi tidak mungkin bocor."""
+    decoder = json.JSONDecoder()
+    search_from = 0
+    while True:
+        idx = html.find('ytInitialPlayerResponse', search_from)
+        if idx == -1:
+            return None
+        search_from = idx + len('ytInitialPlayerResponse')
+        brace = html.find('{', idx)
+        # Marker bisa muncul di string lain (bukan assignment) — kalau '{' jauh, skip
+        if brace == -1 or brace - idx > 200:
+            continue
+        try:
+            obj, _ = decoder.raw_decode(html, brace)
+        except ValueError:
+            continue
+        vd = obj.get('videoDetails') or {}
+        if vd.get('videoId') == video_id:
+            return obj
+
+def _youtube_innertube_details(video_id):
+    """Fallback resmi: InnerTube player API (dipakai player YouTube sendiri).
+    videoDetails-nya selalu terikat ke videoId yang diminta — mustahil kebawa
+    angka video rekomendasi — dan tetap mengembalikan viewCount meski video
+    UNPLAYABLE / kena bot-check yang memblokir HTML watch page di VPS."""
+    try:
+        body = {
+            'context': {'client': {'clientName': 'WEB', 'clientVersion': '2.20240509.00.00', 'hl': 'en', 'gl': 'US'}},
+            'videoId': video_id,
+            'contentCheckOk': True,
+            'racyCheckOk': True,
+        }
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Origin': 'https://www.youtube.com',
+            'Referer': f'https://www.youtube.com/watch?v={video_id}',
+        }
+        resp = requests.post('https://www.youtube.com/youtubei/v1/player',
+                             json=body, headers=headers, timeout=6)
+        vd = resp.json().get('videoDetails') or {}
+        if vd.get('videoId') == video_id:
+            return vd
+    except Exception:
+        pass
+    return None
+
 def get_youtube_custom(url):
     try:
+        video_id = _extract_youtube_id(url)
+        if not video_id:
+            return None
+
         # Use headers that look like a real browser
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -455,44 +529,69 @@ def get_youtube_custom(url):
             'Sec-Ch-Ua-Mobile': '?0',
             'Sec-Ch-Ua-Platform': '"Windows"',
         }
-        
-        # Force desktop watch URL for consistency
-        if "/shorts/" in url:
-            try:
-                vid_id = url.split("/shorts/")[1].split("?")[0]
-                url = f"https://www.youtube.com/watch?v={vid_id}"
-            except: pass
-        
+
         # Load real cookies from file (Fallback to empty or hardcoded if needed, but here we prioritize file)
         cookies = load_cookies()
-        
-        session = requests.Session()
-        response = session.get(url, headers=headers, cookies=cookies, timeout=5) # Fast timeout
-        html = response.text
-        
+
+        html = ''
+        try:
+            session = requests.Session()
+            response = session.get(f"https://www.youtube.com/watch?v={video_id}",
+                                   headers=headers, cookies=cookies, timeout=5) # Fast timeout
+            html = response.text
+        except Exception:
+            pass  # Watch page gagal — InnerTube fallback di bawah tetap jalan
+
         data = {
-            'platform': 'YouTube', 
-            'uploader': 'Unknown', 
-            'title': 'YouTube Video', 
-            'views': 0, 
+            'platform': 'YouTube',
+            'uploader': 'Unknown',
+            'title': 'YouTube Video',
+            'views': 0,
             'likes': 0,
             'comments': 0,
             'shares': 0
         }
 
-        # AUTHORITATIVE: player-response videoDetails is tied to THE watched video.
-        # The ytInitialData "...views" text heuristics below can accidentally grab a
-        # recommended video's view count from the sidebar (e.g. a 63M clip) — this is
-        # especially likely when login cookies reorder the page layout. Read the real
-        # video's viewCount/author here FIRST so the heuristics only act as fallback.
-        vd_views = re.search(r'"videoDetails":\{.*?"viewCount":"(\d+)"', html, re.DOTALL)
-        if vd_views:
-            data['views'] = int(vd_views.group(1))
-        vd_author = re.search(r'"videoDetails":\{.*?"author":"(.*?)"', html, re.DOTALL)
-        if vd_author and vd_author.group(1):
-            data['uploader'] = vd_author.group(1)
+        # Views HARUS berasal dari sumber yang terikat videoId (videoDetails milik
+        # video ini / InnerTube / microdata halaman). Heuristik teks "...views" dari
+        # ytInitialData DILARANG untuk views: teks pertama yang cocok sering milik
+        # video rekomendasi sidebar (63M/2.7M dst) — views dipakai untuk pembayaran
+        # klaim, jadi lebih baik gagal jujur daripada pulang bawa angka video lain.
+        views_verified = False
 
-        # 1. Try extracting ytInitialData (most reliable for standard pages)
+        # 1. AUTHORITATIVE: ytInitialPlayerResponse.videoDetails (videoId dicocokkan)
+        player = _find_player_response(html, video_id) if html else None
+        if player:
+            vd = player.get('videoDetails') or {}
+            if str(vd.get('viewCount', '')).isdigit():
+                data['views'] = int(vd['viewCount'])
+                views_verified = True
+            if vd.get('author'):
+                data['uploader'] = vd['author']
+            if vd.get('title'):
+                data['title'] = vd['title']
+
+        # 2. Fallback: InnerTube player API (videoId dicocokkan juga)
+        if not views_verified:
+            vd = _youtube_innertube_details(video_id)
+            if vd:
+                if str(vd.get('viewCount', '')).isdigit():
+                    data['views'] = int(vd['viewCount'])
+                    views_verified = True
+                if vd.get('author'):
+                    data['uploader'] = vd['author']
+                if vd.get('title'):
+                    data['title'] = vd['title']
+
+        # 3. Last resort: microdata <meta itemprop="interactionCount"> — bagian dari
+        #    markup watch page untuk video halaman ini, bukan sidebar
+        if not views_verified and html:
+            meta_match = re.search(r'itemprop="interactionCount" content="(\d+)"', html)
+            if meta_match:
+                data['views'] = int(meta_match.group(1))
+                views_verified = True
+
+        # Likes/comments (display-only) dari ytInitialData — TIDAK PERNAH untuk views
         try:
              # Use DOTALL (. matches newline) in case of pretty printing
             json_str = None
@@ -501,28 +600,18 @@ def get_youtube_custom(url):
                 r'window\["ytInitialData"\]\s*=\s*({.+?});',
                 r'ytInitialData\s*=\s*({.+?});'
             ]
-            
+
             for p in patterns:
                 match = re.search(p, html, re.DOTALL)
                 if match:
                     json_str = match.group(1)
                     break
-            
+
             if json_str:
-                
-                # Views — FALLBACK ONLY. Authoritative videoDetails.viewCount is read
-                # above; only use ytInitialData heuristics if that failed (views still 0),
-                # because the "...views" simpleText can match a recommended sidebar video.
-                if data['views'] == 0:
-                    v_match = re.search(r'"viewCount":"(\d+)"', json_str)
-                    if not v_match:
-                        v_match = re.search(r'"simpleText":"([0-9,.]+[KMB]?)\s*views"', json_str) # Catch "10K views"
-                    if v_match:
-                        data['views'] = parse_count(v_match.group(1))
-                
-                # Title
-                t_match = re.search(r'"title":\s*{\s*"runs":\s*\[\s*{\s*"text":"(.*?)"', json_str)
-                if t_match: data['title'] = t_match.group(1)
+                # Title (hanya kalau videoDetails tadi tidak kasih)
+                if data['title'] == 'YouTube Video':
+                    t_match = re.search(r'"title":\s*{\s*"runs":\s*\[\s*{\s*"text":"(.*?)"', json_str)
+                    if t_match: data['title'] = t_match.group(1)
                 
                 # Comments
                 c_match = re.search(r'"commentCount":\s*{\s*"simpleText":"([0-9,.]+[KMB]?)"', json_str)
@@ -576,34 +665,14 @@ def get_youtube_custom(url):
             if c_global:
                 data['comments'] = parse_count(c_global.group(1))
 
-        # 3. videoDetails Fallback
-        if data['views'] == 0:
-            match_details = re.search(r'"videoDetails":\s*(\{(?:[^{}]|{|})*\})', html, re.DOTALL)
-            if not match_details:
-                 match_details = re.search(r'"videoDetails":\s*({.+?})', html, re.DOTALL)
-    
-            if match_details:
-                details_json = match_details.group(1)
-                v_match = re.search(r'"viewCount":"(\d+)"', details_json)
-                if v_match: data['views'] = int(v_match.group(1))
-                
-                t_match = re.search(r'"title":"(.*?)"', details_json)
-                if t_match: data['title'] = t_match.group(1)
-                
-                a_match = re.search(r'"author":"(.*?)"', details_json)
-                if a_match: data['uploader'] = a_match.group(1)
-
-        # 3. Meta Fallback
-        if data['views'] == 0:
-            meta_match = re.search(r'itemprop="interactionCount" content="(\d+)"', html)
-            if meta_match: data['views'] = int(meta_match.group(1))
-
-        if data['views'] > 0:
+        # Return HANYA kalau views datang dari sumber terverifikasi (videoId cocok).
+        # views == 0 pun sah kalau terverifikasi — video baru memang bisa 0 views.
+        if views_verified:
             return data
-            
+
     except Exception:
         pass
-        
+
     return None # Do NOT return error, just None to trigger fail-fast
 
 def get_universal_stats(url):
