@@ -1100,6 +1100,25 @@ def _vcache_set(key, data):
                 _verify_cache.pop(k, None)
 
 
+def _canon_confusable(s):
+    """Lipat karakter yang MIRIP SECARA VISUAL supaya kode tetap kecocokan walau
+    creator salah ketik pakai karakter kembar. Kode di-generate dari alfabet
+    'abcdefghjklmnpqrstuvwxyz23456789' (huruf 'i','o' & angka '1','0' SUDAH
+    dibuang) TAPI huruf 'l' (L kecil) masih ikut — dan 'l' itu di layar tak bisa
+    dibedakan dari '1'/'I'. Creator sering menyalin ulang kode & menukar 'l' jadi
+    'I' atau '1' (persis kasus id 'lk2aewlp' -> ditulis 'Ik2aewlp' di caption).
+
+    Cuma melipat kelas yang TIDAK MUNGKIN bentrok dgn alfabet generator, jadi
+    nggak bikin kode beda jadi ketuker:
+      I / L / 1 / |  -> I   (generator cuma pernah keluarin 'l')
+      O / 0          -> O   (generator nggak pernah keluarin dua-duanya)
+    Input diasumsikan sudah .upper(). Sengaja konservatif: hanya MENAMBAH
+    kecocokan, tidak pernah menghilangkan.
+    """
+    return (s.replace('L', 'I').replace('1', 'I').replace('|', 'I')
+             .replace('0', 'O'))
+
+
 class VerifyRequest(BaseModel):
     url: str
     expectedCode: str
@@ -1163,6 +1182,13 @@ def verify(req: VerifyRequest):
     normalized_caption = caption.upper()
     normalized_code = code.upper().strip()
     is_valid = normalized_code in normalized_caption
+
+    # Fallback toleransi karakter kembar (l/I/1, O/0). Creator yang menyalin ulang
+    # kode dgn tangan sering menukar 'l' -> 'I'/'1' dsb, bikin kode SEBENARNYA ada
+    # di caption tapi gagal cocok persis. Lipat kedua sisi ke bentuk kanonik lalu
+    # cek ulang. Hanya MENAMBAH kecocokan, tidak pernah menolak yg sudah valid.
+    if not is_valid:
+        is_valid = _canon_confusable(normalized_code) in _canon_confusable(normalized_caption)
 
     # If rejected BUT source was risky (truncated OG tags etc) -> ALLOW (Manual Check)
     risky_sources = [
