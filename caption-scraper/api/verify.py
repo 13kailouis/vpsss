@@ -85,6 +85,14 @@ def get_tiktok_caption(url, expected_code=None):
         'Accept-Encoding': 'gzip, deflate',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
+        # Referer + Sec-Ch-Ua bikin request tampak seperti navigasi browser asli.
+        # matrix-scrapper pakai set header ini & TERBUKTI dapat data TikTok dari IP
+        # datacenter VPS yang sama (mis. video ZSXXtwUdU → 711 views), sedangkan
+        # tanpa Referer sering balik bot-wall "Main:NoData". Murah & aman.
+        'Referer': 'https://www.tiktok.com/',
+        'Sec-Ch-Ua': '"Chromium";v="131", "Google Chrome";v="131", "Not-A.Brand";v="99"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
         'Sec-Fetch-Dest': 'document',
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'none',
@@ -342,155 +350,230 @@ def get_tiktok_caption(url, expected_code=None):
         print(f"Scraper Error: {str(e)}")
         return None, f"TikTok:Error:{str(e)[:20]}"
 
-def get_youtube_caption(url, expected_code=None):
-    # Spoof Googlebot - YouTube usually treats this as a VIP
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    }
-    
-    debug = {"log": []}
-    
+# ── YouTube config & helpers ─────────────────────────────────────────────
+# Data API v3 key resmi (OPSIONAL). Kalau di-set, dipakai sebagai sumber UTAMA:
+# tanpa bot-check, deskripsi selalu lengkap → kode pasti kebaca. Key SAMA dengan
+# yang dipakai matrix-scrapper (share kuota; verify volumenya kecil, 1 unit/call).
+YT_API_KEY = os.environ.get('YT_API_KEY', '').strip()
+
+# Deskripsi generik bawaan YouTube ("Nikmati video dan musik yang Anda suka,
+# upload konten asli, ..."/versi EN). Muncul saat deskripsi ASLI tak tersedia
+# (bot-check / HTML dipangkas di IP datacenter). DULU string ini diterima sebagai
+# "caption" → kode creator tak ketemu → creator DITOLAK padahal kodenya benar
+# ada. Sekarang dianggap sampah dan TIDAK PERNAH dikembalikan sebagai caption.
+_YT_BOILERPLATE = (
+    'upload konten asli',          # ID boilerplate
+    'upload original content',     # EN boilerplate
+    'nikmati video dan musik',
+    'enjoy the videos and music',
+)
+
+
+def _yt_is_boilerplate(text):
+    t = (text or '').lower()
+    return any(m in t for m in _YT_BOILERPLATE)
+
+
+def _yt_extract_id(url):
+    """videoId dari semua bentuk URL YT (shorts/watch/youtu.be/live/embed)."""
     try:
-        video_id = None
-        if '/shorts/' in url:
-            match = re.search(r'/shorts/([a-zA-Z0-9_-]+)', url)
-            if match: video_id = match.group(1)
-        elif 'youtu.be' in url:
-            video_id = urlparse(url).path.strip('/')
-        else:
-            qs = parse_qs(urlparse(url).query)
-            if 'v' in qs: video_id = qs['v'][0]
-            
-        if not video_id: 
-            return None, "No Video ID extracted"
-        
-        debug['log'].append(f"VI:{video_id}")
-        
-        # Direct Scraping with Googlebot UA
+        for marker in ('/shorts/', '/live/', '/embed/', 'youtu.be/'):
+            if marker in url:
+                cand = url.split(marker)[1]
+                cand = re.split(r'[?&#/]', cand)[0]
+                if cand:
+                    return cand
+        qs = parse_qs(urlparse(url).query)
+        if qs.get('v') and qs['v'][0]:
+            return qs['v'][0]
+    except Exception:
+        pass
+    return None
+
+
+def _yt_find_player_response(html, video_id):
+    """Parse ytInitialPlayerResponse jadi JSON beneran pakai raw_decode (berhenti
+    TEPAT di akhir 1 objek → mustahil kepotong/bocor seperti `find(';')` lama yang
+    motong di ';'/'<'/'\\n' PERTAMA — karakter itu sering muncul di dalam string
+    JSON YouTube, jadi hasilnya untung-untungan per request/IP). HANYA terima kalau
+    videoDetails.videoId == video yang diminta."""
+    decoder = json.JSONDecoder()
+    search_from = 0
+    while True:
+        idx = html.find('ytInitialPlayerResponse', search_from)
+        if idx == -1:
+            return None
+        search_from = idx + len('ytInitialPlayerResponse')
+        brace = html.find('{', idx)
+        # Marker bisa muncul di string lain (bukan assignment) — kalau '{' jauh, skip
+        if brace == -1 or brace - idx > 200:
+            continue
         try:
-            response = requests.get(f"https://www.youtube.com/watch?v={video_id}", headers=headers, timeout=7)
-            html = response.text
-            debug['len'] = len(html)
-            
-            # Check for Sign In / Consent indicators
-            if "sign in" in html.lower(): debug['log'].append("Sign-in")
-            if "consent" in html.lower(): debug['log'].append("Consent")
-            
-            # 1. Try application/ld+json (Only if it has a real description — YouTube often omits it)
-            ld_json_matches = re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
-            for ld_match in ld_json_matches:
+            obj, _ = decoder.raw_decode(html, brace)
+        except ValueError:
+            continue
+        vd = obj.get('videoDetails') or {}
+        if vd.get('videoId') == video_id:
+            return obj
+
+
+def _yt_caption_from_player(player):
+    vd = (player or {}).get('videoDetails', {}) or {}
+    title = vd.get('title', '') or ''
+    desc = vd.get('shortDescription', '') or ''
+    if not desc:
+        micro = (player or {}).get('microformat', {}).get('playerMicroformatRenderer', {})
+        desc = (micro.get('description', {}) or {}).get('simpleText', '') or ''
+    full = f"{title} {desc}".strip()
+    return full or None
+
+
+def _yt_innertube_caption(video_id):
+    """Fallback resmi: InnerTube player API (dipakai player YouTube sendiri). Tetap
+    balikin videoDetails (title+shortDescription) walau HTML watch page kena
+    bot-check di IP datacenter. videoId dicocokkan agar tak kebawa video lain."""
+    try:
+        body = {
+            'context': {'client': {'clientName': 'WEB', 'clientVersion': '2.20240509.00.00', 'hl': 'en', 'gl': 'US'}},
+            'videoId': video_id, 'contentCheckOk': True, 'racyCheckOk': True,
+        }
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Origin': 'https://www.youtube.com',
+            'Referer': f'https://www.youtube.com/watch?v={video_id}',
+        }
+        resp = requests.post('https://www.youtube.com/youtubei/v1/player', json=body, headers=headers, timeout=7)
+        vd = resp.json().get('videoDetails') or {}
+        if vd.get('videoId') == video_id:
+            title = vd.get('title', '') or ''
+            desc = vd.get('shortDescription', '') or ''
+            full = f"{title} {desc}".strip()
+            return full or None
+    except Exception:
+        pass
+    return None
+
+
+def _yt_data_api_caption(video_id):
+    """Sumber paling andal: Data API v3 resmi (part=snippet). Tanpa bot-check.
+    Hanya jalan kalau YT_API_KEY di-set. snippet.description memuat kode unik."""
+    if not YT_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            'https://www.googleapis.com/youtube/v3/videos',
+            params={'part': 'snippet', 'id': video_id, 'key': YT_API_KEY},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return None
+        items = resp.json().get('items', [])
+        if items:
+            snip = items[0].get('snippet', {}) or {}
+            title = snip.get('title', '') or ''
+            desc = snip.get('description', '') or ''
+            full = f"{title} {desc}".strip()
+            return full or None
+    except Exception:
+        pass
+    return None
+
+
+def get_youtube_caption(url, expected_code=None):
+    """Baca judul+deskripsi video YT (tempat kode unik ditaruh creator).
+
+    Strategi berlapis, dari paling andal ke fallback:
+      1. Data API v3 resmi (kalau YT_API_KEY di-set) — tanpa bot-check.
+      2. HTML watch page → ytInitialPlayerResponse (raw_decode, videoId cocok).
+      3. InnerTube WEB player API — tetap jalan walau HTML kena bot-check.
+      4. ytInitialData panel deskripsi terstruktur.
+      5. Grep kode persis di HTML (sinyal positif kuat).
+
+    Deskripsi generik bawaan YT TIDAK PERNAH diterima. Kalau caption asli tak
+    terbaca → balikin None supaya endpoint fail-open (cek manual), BUKAN nolak
+    creator dengan 'Kode tidak ditemukan' palsu (bug lama: boilerplate diterima
+    sebagai caption lalu kode dinyatakan tak ada)."""
+    video_id = _yt_extract_id(url)
+    if not video_id:
+        return None, "YT:NoVideoID"
+
+    # 1) Data API v3 resmi (paling andal, tanpa bot-check)
+    cap = _yt_data_api_caption(video_id)
+    if cap and not _yt_is_boilerplate(cap):
+        return cap, "Src:DataAPI"
+
+    # 2) Watch page HTML → player response (raw_decode + videoId match)
+    html = ""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.youtube.com/',
+        }
+        html = requests.get(f"https://www.youtube.com/watch?v={video_id}", headers=headers, timeout=8).text
+    except Exception:
+        html = ""
+
+    if html:
+        player = _yt_find_player_response(html, video_id)
+        if player:
+            cap = _yt_caption_from_player(player)
+            if cap and not _yt_is_boilerplate(cap):
+                return cap, "Src:PlayerJSON"
+
+    # 3) InnerTube WEB player fallback (lolos bot-check)
+    cap = _yt_innertube_caption(video_id)
+    if cap and not _yt_is_boilerplate(cap):
+        return cap, "Src:InnerTube"
+
+    # 4) ytInitialData: panel deskripsi terstruktur (kalau ada)
+    if html:
+        try:
+            decoder = json.JSONDecoder()
+            search_from = 0
+            while True:
+                idx = html.find('ytInitialData', search_from)
+                if idx == -1:
+                    break
+                search_from = idx + len('ytInitialData')
+                brace = html.find('{', idx)
+                if brace == -1 or brace - idx > 200:
+                    continue
                 try:
-                    ld_data = json.loads(ld_match)
-                    if isinstance(ld_data, list): ld_data = ld_data[0]
-                    if isinstance(ld_data, dict):
-                        description = ld_data.get('description', '') or ''
-                        title = ld_data.get('name', '') or ld_data.get('title', '') or ''
-                        # Only trust LD-JSON if description is actually populated.
-                        # YouTube frequently returns empty description here, which would
-                        # short-circuit the more reliable PlayerJSON path below and miss
-                        # unique codes placed in the real description body.
-                        if description and not description.endswith('...'):
-                            full = f"{title} {description}".strip()
-                            if full:
-                                return full, "Src:LD-JSON"
-                except: continue
-            debug['log'].append("LD-JSON-Fail")
+                    initial_data, _ = decoder.raw_decode(html, brace)
+                except ValueError:
+                    continue
+                panels = initial_data.get('engagementPanels', [])
+                for panel in panels:
+                    renderer = panel.get('engagementPanelSectionListRenderer', {})
+                    if renderer.get('targetId') == 'engagement-panel-structured-description':
+                        items = renderer.get('content', {}).get('structuredDescriptionContentRenderer', {}).get('items', [])
+                        for item in items:
+                            body = item.get('expandableVideoDescriptionBodyRenderer', {})
+                            if body:
+                                runs = body.get('descriptionBodyText', {}).get('runs', [])
+                                text = "".join([r.get('text', '') for r in runs])
+                                if text and not _yt_is_boilerplate(text):
+                                    return text, "Src:InitialData-Panel"
+                if panels:
+                    break  # objek player-response benar sudah ketemu; stop nyari
+        except Exception:
+            pass
 
-            # 2. Extract JSON using a more robust splitting method (Regex can hang on large HTML)
-            def extract_json(html, marker):
-                try:
-                    start_ptr = html.find(marker)
-                    if start_ptr == -1: return None
-                    start_ptr = html.find('{', start_ptr)
-                    if start_ptr == -1: return None
-                    
-                    # Search for the end of the JSON object
-                    # We look for the closing brace followed by a delimiter
-                    delimiters = [';', '<', '/script>', '\n', '\r']
-                    end_ptr = -1
-                    for delim in delimiters:
-                        ptr = html.find(delim, start_ptr)
-                        if ptr != -1:
-                            if end_ptr == -1 or ptr < end_ptr:
-                                end_ptr = ptr
-                    
-                    if end_ptr == -1: end_ptr = len(html)
-                    json_str = html[start_ptr:end_ptr].strip()
-                    # Final cleanup of trailing non-JSON chars
-                    if json_str.endswith(';'): json_str = json_str[:-1]
-                    return json.loads(json_str)
-                except: return None
+    # 5) Grep kode persis langsung di HTML (sinyal positif sangat kuat)
+    if html and expected_code and expected_code.lower() in html.lower():
+        code_idx = html.lower().find(expected_code.lower())
+        start = max(0, code_idx - 200)
+        end = min(len(html), code_idx + len(expected_code) + 200)
+        snip = re.sub(r'<[^>]+>', ' ', html[start:end])
+        snip = re.sub(r'\s+', ' ', snip).strip()
+        return f"...{snip}...", "Src:HTML-Grepped-ExactCode"
 
-            # --- Try ytInitialPlayerResponse ---
-            player_data = extract_json(html, 'ytInitialPlayerResponse')
-            if player_data:
-                try:
-                    # Method A: microformat (standard)
-                    micro = player_data.get('microformat', {}).get('playerMicroformatRenderer', {})
-                    m_desc = micro.get('description', {}).get('simpleText', '')
-                    m_title = micro.get('title', {}).get('simpleText', '')
-                    
-                    # Method B: videoDetails (Shorts & Standard)
-                    d = player_data.get('videoDetails', {})
-                    title = d.get('title', '')
-                    desc = d.get('shortDescription', '')
-                    
-                    final_title = title or m_title
-                    final_desc = desc or m_desc
-                    full = f"{final_title} {final_desc}".strip()
-                    if full: return full, "Src:PlayerJSON"
-                except: pass
-            debug['log'].append("No-PlayerJSON")
-
-            # --- Try ytInitialData ---
-            initial_data = extract_json(html, 'ytInitialData')
-            if initial_data:
-                try:
-                    panels = initial_data.get('engagementPanels', [])
-                    for panel in panels:
-                        renderer = panel.get('engagementPanelSectionListRenderer', {})
-                        if renderer.get('targetId') == 'engagement-panel-structured-description':
-                            items = renderer.get('content', {}).get('structuredDescriptionContentRenderer', {}).get('items', [])
-                            for item in items:
-                                body = item.get('expandableVideoDescriptionBodyRenderer', {})
-                                if body:
-                                    runs = body.get('descriptionBodyText', {}).get('runs', [])
-                                    text = "".join([r.get('text', '') for r in runs])
-                                    if text: return text, "Src:InitialData-Panel"
-                except: pass
-            debug['log'].append("No-InitialData")
-
-            # 4. Meta Tags (Fallback)
-            meta_desc = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', html, re.IGNORECASE)
-            meta_title = re.search(r'<meta[^>]*property="og:title"[^>]*content="([^"]*)"', html, re.IGNORECASE)
-            
-            desc = meta_desc.group(1) if meta_desc else ""
-            title = meta_title.group(1) if meta_title else ""
-            
-            if not desc:
-                meta_desc_name = re.search(r'<meta[^>]*name="description"[^>]*content="([^"]*)"', html, re.IGNORECASE)
-                if meta_desc_name: desc = meta_desc_name.group(1)
-
-            full_meta = f"{title} {desc}".strip()
-            if full_meta:
-                 return full_meta, "Src:MetaTags"
-            else:
-                 debug['log'].append("Meta-Empty")
-                 
-            # 5. Exact code fallback directly in HTML
-            if expected_code and expected_code.lower() in html.lower():
-                code_idx = html.lower().find(expected_code.lower())
-                start = max(0, code_idx - 200)
-                end = min(len(html), code_idx + len(expected_code) + 200)
-                snip = html[start:end]
-                snip = re.sub(r'<[^>]+>', ' ', snip)
-                return f"...{snip}...", "Src:HTML-Grepped-ExactCode"
-        except Exception as e:
-            debug['log'].append(f"ReqFailed:{str(e)[:30]}")
-            
-        return None, f"Fail:{';'.join(debug['log'])}"
-    except Exception as e: return None, f"Err:{str(e)}"
+    # Gagal baca caption asli → None → endpoint fail-open (cek manual). TIDAK
+    # pernah nolak palsu berdasarkan boilerplate generik YouTube.
+    return None, f"YT:Unreadable(vid={video_id})"
 
 def extract_instagram_shortcode(url):
     """Extract shortcode from Instagram URL"""
@@ -499,16 +582,96 @@ def extract_instagram_shortcode(url):
         return match.group(2)
     return None
 
+
+# ── Instagram config & helpers ───────────────────────────────────────────
+# Cookie 'sessionid' akun burner IG untuk bypass blok IP datacenter. Dari VPS,
+# SEMUA UA (facebot/googlebot/iphone/...) kena HTTP 429 tanpa login → caption
+# tak pernah kebaca. Dengan sessionid, GraphQL API resmi jalan normal. Bisa
+# banyak sessionid (pisah koma/spasi/baris) → dirotasi acak. SAMA seperti
+# matrix-scrapper (yang sudah terbukti jalan di produksi untuk views).
+def _parse_ig_pool(raw):
+    if not raw:
+        return []
+    return [s.strip() for s in re.split(r'[,\s]+', raw) if s.strip()]
+
+
+IG_SESSION_POOL = _parse_ig_pool(os.environ.get('IG_SESSIONID', '') or os.environ.get('IG_SESSIONIDS', ''))
+IG_PROXY = os.environ.get('IG_PROXY', '').strip()
+IG_BASE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+
+
+def _ig_graphql_caption(shortcode):
+    """Ambil caption penuh via GraphQL API resmi IG + cookie sessionid — satu-
+    satunya cara andal dari IP datacenter (embed/og mentah kena 429). Return teks
+    caption atau None. doc_id & alur sama dengan matrix-scrapper. Retry pakai
+    sessionid berbeda (gagal biasanya = akun itu kena flag)."""
+    if not IG_SESSION_POOL:
+        return None  # tak ada cookie → skip; metode lama di bawah tetap dicoba
+    gql_url = 'https://www.instagram.com/graphql/query/'
+    params = {'doc_id': '8845758582119845', 'variables': json.dumps({'shortcode': shortcode})}
+    tried = set()
+    for attempt in range(2):
+        pool = [s for s in IG_SESSION_POOL if s not in tried] or IG_SESSION_POOL
+        sid = random.choice(pool)
+        tried.add(sid)
+        s = requests.Session()
+        s.cookies.set('sessionid', sid, domain='.instagram.com')
+        if IG_PROXY:
+            s.proxies.update({'http': IG_PROXY, 'https': IG_PROXY})
+        # Warmup embed dulu supaya dapat cookie csrftoken/mid
+        try:
+            s.get(f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
+                  headers={'User-Agent': IG_BASE_UA}, timeout=4)
+        except Exception:
+            pass
+        headers = {
+            'User-Agent': IG_BASE_UA,
+            'X-IG-App-ID': '936619743392459',
+            'X-ASBD-ID': '129477',
+            'X-IG-WWW-Claim': '0',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': f'https://www.instagram.com/p/{shortcode}/embed/',
+        }
+        csrf = s.cookies.get('csrftoken')
+        if csrf:
+            headers['X-CSRFToken'] = csrf
+        try:
+            r = s.get(gql_url, headers=headers, params=params, timeout=8)
+            if r.status_code == 200:
+                media = (r.json().get('data', {}) or {}).get('xdt_shortcode_media')
+                if media:
+                    edges = (media.get('edge_media_to_caption', {}) or {}).get('edges', [])
+                    if edges:
+                        text = (edges[0].get('node', {}) or {}).get('text', '')
+                        if text:
+                            return text
+                    return None  # media ketemu tapi caption memang kosong
+        except Exception:
+            pass
+        if attempt == 0:
+            time.sleep(0.6)
+    return None
+
+
 def get_instagram_caption(url, expected_code=None):
     """Scrape caption from Instagram Reels/Post URL using multiple methods"""
     caption = None
     debug_log = []
-    
+
     try:
         shortcode = extract_instagram_shortcode(url)
         if not shortcode:
             return None, "Invalid URL"
-        
+
+        # Method 0: GraphQL API resmi + cookie sessionid. Dari IP datacenter ini
+        # praktis SATU-SATUNYA yang lolos (metode di bawah kena 429). Kalau tak ada
+        # cookie / gagal → return None → lanjut metode lama tanpa efek samping.
+        gql_cap = _ig_graphql_caption(shortcode)
+        if gql_cap:
+            return gql_cap, "Src:GraphQL-Auth"
+
         # Method 1: Instagram public oEmbed used to work without auth; as of 2024+
         # api.instagram.com/oembed returns an HTML login wall, not JSON. Skipped.
 

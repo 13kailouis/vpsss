@@ -8,6 +8,15 @@ services:
       - "8000"
     environment:
       - PYTHONUNBUFFERED=1
+      # YouTube Data API v3 (resmi) — sumber caption paling andal, tanpa bot-check.
+      # Key SAMA dengan matrix-scrapper (isi di .env: YT_API_KEY=AIza...). Kosong =
+      # fallback ke scraping watch-page + InnerTube (tetap jauh lebih baik dari lama).
+      - YT_API_KEY=${YT_API_KEY:-}
+      # Instagram: cookie sessionid akun burner untuk bypass blok IP datacenter
+      # (VPS kena HTTP 429 di semua UA tanpa login). Bisa banyak (pisah koma) untuk
+      # dirotasi. Isi di .env: IG_SESSIONID=sid1,sid2. IG_PROXY opsional (residential).
+      - IG_SESSIONID=${IG_SESSIONID:-}
+      - IG_PROXY=${IG_PROXY:-}
     networks:
       - wefluence
     logging:
