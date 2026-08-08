@@ -10,8 +10,113 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-def get_tiktok_embed_html(video_id):
-    """Fetch TikTok Embed V2 HTML using rotating headers"""
+# ── TikTok: sumber caption & urutannya ───────────────────────────────────
+# embed/v2 kena rate-limit ketat dari IP datacenter: tanpa cookie cuma lolos
+# 1-2 request lalu dibalas "overload-protect triggered" (503) atau 400. Diuji
+# 7 Agu 2026, 5 request beruntun -> 200 200 503 503 503. Jadi embed/v2 TIDAK
+# layak lagi jadi sumber awal. Urutan baru: yang murah & tahan banting duluan.
+#
+#   1. oEmbed          JSON ~1.6 KB, caption UTUH. Diuji atas 19 video (caption
+#                      39-1767 karakter): title oEmbed SELALU byte-identik dgn
+#                      desc asli, termasuk hashtag di ujung -> aman buat kode
+#                      yang ditaruh di akhir caption.
+#   2. halaman kanonik UA Bytespider (crawler resmi ByteDance) tembus penuh
+#                      ~380 KB & selalu memuat "desc" (8/8), sedangkan UA Chrome
+#                      cuma dapat bot-wall 1462 byte (8/8).
+#   3. embed/v2        tetap dipakai, tapi paling akhir + retry/backoff.
+#   4. TikWM           last resort pihak ketiga.
+#
+# CATATAN player/v1: SENGAJA tidak dipakai untuk caption. Endpoint itu memang
+# stabil 200 (lolos rate-limit) tapi isinya cuma shell player — tidak ada desc,
+# tidak ada og:*, dan JSON __MODERN_ROUTER_DATA__-nya cuma config pemutar.
+# Diuji: nol caption. Dia cocok buat <iframe> di app (TikTokEmbed.js sudah
+# pindah ke sana), BUKAN buat mengambil teks caption.
+
+_TIKTOK_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+# Anggaran waktu untuk SATU panggilan get_tiktok_caption. Rantainya ada 4 sumber
+# & dua di antaranya berat (halaman kanonik ~380 KB, embed/v2 ~300 KB), jadi
+# tanpa batas ini kasus terburuk terukur tembus ~35 detik saat jaringan lemot —
+# kelamaan untuk endpoint yang dipanggil interaktif. Sumber yang sisa waktunya
+# tidak cukup akan dilewati & dicatat di debug_log (mis. "Main:Budget"), bukan
+# bikin request menggantung. Hasil sementara (mis. caption oEmbed) tetap dipakai.
+#
+# Ini anggaran LUNAK, bukan stopwatch keras: batasnya dicek di antara request,
+# dan requests menghitung timeout connect & read terpisah, jadi satu request yang
+# terlanjur jalan masih bisa lewat sedikit. Terukur: target 15 dtk -> realisasi
+# terburuk ~17 dtk (URL tak valid, semua sumber gagal). Kalau butuh lebih ketat/
+# longgar, ganti lewat env TIKTOK_BUDGET_SEC tanpa rebuild image.
+_TIKTOK_BUDGET_SEC = float(os.environ.get('TIKTOK_BUDGET_SEC', '15'))
+_TIKTOK_MIN_SLICE_SEC = 2.0  # di bawah ini percuma mulai request baru
+_TIKTOK_CONNECT_CAP_SEC = 4.0  # host tak nyambung: jangan buang jatah di connect
+
+
+def _tt_left(deadline):
+    """Sisa anggaran waktu (detik)."""
+    return deadline - time.time()
+
+
+def _tt_timeout(deadline, want):
+    """Timeout (connect, read) untuk satu request, dibatasi sisa anggaran.
+
+    Dipisah connect vs read supaya host yang mati/diblokir tidak menghabiskan
+    seluruh jatah cuma buat menunggu handshake.
+    """
+    left = max(1.0, min(want, _tt_left(deadline)))
+    return (min(_TIKTOK_CONNECT_CAP_SEC, left), left)
+
+
+_TIKTOK_UA_BYTESPIDER = (
+    'Mozilla/5.0 (Linux; Android 5.0) AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Mobile Safari/537.36 (compatible; Bytespider; spider-feedback@bytedance.com)'
+)
+
+
+def _tiktok_get(url, headers=None, timeout=6, retries=1, session=None, deadline=None):
+    """GET dengan backoff kecil khusus jawaban rate-limit/overload TikTok.
+
+    Balikin response terakhir (boleh non-200) atau None kalau koneksinya yang
+    gagal. Backoff pendek + jitter: verify dipanggil interaktif, jadi lebih baik
+    cepat nyerah lalu pindah ke sumber berikutnya daripada nahan request lama.
+
+    PENTING — retry penuh HANYA untuk status rate-limit/overload (503/429/5xx).
+    Jawaban itu datang cepat, jadi mengulanginya murah dan memang di situ
+    gunanya backoff. Sebaliknya timeout/error koneksi sudah menghabiskan jatah
+    waktu penuh; mengulanginya cuma melipatgandakan latensi dan jarang menolong,
+    jadi error koneksi dibatasi 1 percobaan ulang saja. Tanpa batas ini rantai
+    4 sumber bisa tembus ~17 detik saat semua sumber lemot (terukur).
+    """
+    getter = (session or requests).get
+    last = None
+    conn_errors = 0
+    for attempt in range(retries + 1):
+        try:
+            resp = getter(url, headers=headers, timeout=timeout)
+            if resp.status_code not in _TIKTOK_RETRY_STATUS:
+                return resp
+            last = resp
+        except Exception:
+            last = None
+            conn_errors += 1
+            if conn_errors > 1:
+                break
+        if attempt < retries:
+            wait = 0.5 * (2 ** attempt) + random.uniform(0, 0.25)
+            # Jangan tidur (lalu retry) kalau anggaran waktunya sudah tidak cukup.
+            if deadline is not None and _tt_left(deadline) - wait < _TIKTOK_MIN_SLICE_SEC:
+                break
+            time.sleep(wait)
+    return last
+
+
+def get_tiktok_embed_html(video_id, deadline=None):
+    """Fetch TikTok Embed V2 HTML using rotating headers.
+
+    Dipakai PALING AKHIR sekarang (lihat catatan rate-limit di atas), dengan
+    retry/backoff supaya 503 sesaat tidak langsung mematikan jalur ini.
+    """
+    if deadline is None:
+        deadline = time.time() + _TIKTOK_BUDGET_SEC
     url = f"https://www.tiktok.com/embed/v2/{video_id}"
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -23,22 +128,22 @@ def get_tiktok_embed_html(video_id):
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
     }
-    try:
-        resp = requests.get(url, headers=headers, timeout=6)
-        if resp.status_code == 200:
-            return resp.text
-        return None
-    except:
-        return None
+    resp = _tiktok_get(url, headers=headers, timeout=_tt_timeout(deadline, 6),
+                       retries=2, deadline=deadline)
+    if resp is not None and resp.status_code == 200:
+        return resp.text
+    return None
 
-def get_tiktok_tikwm(url):
+def get_tiktok_tikwm(url, deadline=None):
     """Fetch TikTok caption via TikWM API (Bypass for restricted/hidden content)"""
+    if deadline is None:
+        deadline = time.time() + _TIKTOK_BUDGET_SEC
     try:
         api_url = f"https://www.tikwm.com/api/?url={quote(url)}"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
         }
-        resp = requests.get(api_url, headers=headers, timeout=6)
+        resp = requests.get(api_url, headers=headers, timeout=_tt_timeout(deadline, 6))
         if resp.status_code == 200:
             data = resp.json()
             if data.get('code') == 0:
@@ -50,26 +155,61 @@ def get_tiktok_tikwm(url):
     except:
         return None, None
 
-def get_tiktok_oembed(url):
-    """Fetch TikTok caption via oEmbed API (Very reliable for basic metadata)"""
-    try:
-        # Strip query params for oEmbed to stay clean
-        clean_url = url.split('?')[0]
-        oembed_url = f"https://www.tiktok.com/oembed?url={quote(clean_url)}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-        }
-        resp = requests.get(oembed_url, headers=headers, timeout=6)
-        if resp.status_code == 200:
-            data = resp.json()
-            # oEmbed 'title' often contains the caption
-            return data.get('title', ''), "TikTok:oEmbed", "oEmbed:OK"
-        return None, None, f"oEmbed:{resp.status_code}"
-    except Exception as e:
-        return None, None, f"oEmbedErr:{str(e)[:15]}"
+def get_tiktok_oembed(url, video_id=None, deadline=None):
+    """Caption via oEmbed resmi TikTok — sekarang sumber UTAMA.
+
+    BUKAN sumber terpotong: diuji 7 Agu 2026 atas 19 video dgn caption 39-1767
+    karakter, field 'title' SELALU byte-identik dgn caption penuh (hashtag di
+    ujung ikut terbawa). Endpoint-nya juga jauh lebih ringan dari embed/v2
+    (~1.6 KB vs ~300 KB) dan tidak ikut kena overload-protect embed/v2.
+
+    Dua sifat rewelnya yang sudah diakali di sini:
+      - username di URL DIABAIKAN (cuma id yg dipakai), jadi URL tanpa @user
+        atau dgn @user salah tetap dilayani;
+      - path-nya rewel: '/photo/{id}' dibalas 400 sedangkan '/video/{id}' 200.
+    Makanya kalau URL asli gagal & id-nya kita punya, dicoba ulang dalam bentuk
+    '/video/{id}' — ini yang menyelamatkan post foto.
+    """
+    if deadline is None:
+        deadline = time.time() + _TIKTOK_BUDGET_SEC
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    }
+    # Strip query params for oEmbed to stay clean
+    candidates = [url.split('?')[0]]
+    if video_id:
+        normalized = f"https://www.tiktok.com/@i/video/{video_id}"
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    last_err = "oEmbed:NoTry"
+    for candidate in candidates:
+        if _tt_left(deadline) < _TIKTOK_MIN_SLICE_SEC:
+            return None, None, "oEmbed:Budget"
+        oembed_url = f"https://www.tiktok.com/oembed?url={quote(candidate)}"
+        resp = _tiktok_get(oembed_url, headers=headers,
+                           timeout=_tt_timeout(deadline, 6), retries=2, deadline=deadline)
+        if resp is None:
+            last_err = "oEmbedErr:conn"
+            continue
+        if resp.status_code != 200:
+            last_err = f"oEmbed:{resp.status_code}"
+            continue
+        try:
+            title = (resp.json().get('title') or '').strip()
+        except Exception as e:
+            last_err = f"oEmbedErr:{str(e)[:15]}"
+            continue
+        if title:
+            return title, "TikTok:oEmbed", "oEmbed:OK"
+        # Video dihapus/privat dibalas 200 tapi title kosong — bukan error,
+        # tapi juga bukan caption. Lanjut ke kandidat/sumber berikutnya.
+        last_err = "oEmbed:Empty"
+    return None, None, last_err
 
 def get_tiktok_caption(url, expected_code=None):
     debug_log = []
+    deadline = time.time() + _TIKTOK_BUDGET_SEC
     # Modern Rotating User-Agents (Post Chrome 130)
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -127,15 +267,64 @@ def get_tiktok_caption(url, expected_code=None):
         # IPs), so a follow-up GET would just burn another timeout. Skip it.
         if 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
             try:
-                response = session.head(url, headers=headers, allow_redirects=True, timeout=5)
+                response = session.head(url, headers=headers, allow_redirects=True,
+                                        timeout=_tt_timeout(deadline, 5))
                 url = response.url
             except:
                 debug_log.append("ResolveFail")
 
-        # 2. Main Page Scraping (Primary - Full JSON)
+        # Id video dipakai beberapa sumber (oEmbed & embed/v2), jadi diambil
+        # sekali di sini. Post foto pakai /photo/{id} tapi id-nya sama bentuknya.
+        video_id = None
+        id_match = re.search(r'/video/(\d+)', url) or re.search(r'/photo/(\d+)', url)
+        if id_match:
+            video_id = id_match.group(1)
+
+        # 1. oEmbed (SUMBER UTAMA — murah, caption utuh, tak kena rate-limit
+        # embed/v2). Kalau captionnya sudah memuat kode yang dicari, itu bukti
+        # definitif: langsung balik, hemat fetch halaman ~380 KB di bawah.
+        #
+        # Kalau captionnya ADA tapi TANPA kode, JANGAN langsung balik — simpan
+        # dulu sebagai cadangan lalu tetap coba sumber lain. Alasannya oEmbed
+        # bisa dilayani dari cache CDN & masih basi beberapa saat setelah
+        # creator baru mengedit caption; kalau kita kunci hasil basi itu,
+        # creator yang sudah benar bisa kena tolak.
+        oembed_fallback = None
+        oembed_caption, oembed_src, oembed_err = get_tiktok_oembed(url, video_id, deadline)
+        if oembed_caption:
+            cap_lower = oembed_caption.lower()
+            if any(p.lower() in cap_lower for p in garbage_phrases):
+                debug_log.append("oEmbed:Garbage")
+            elif expected_code and expected_code.lower() in cap_lower:
+                return oembed_caption, oembed_src
+            else:
+                oembed_fallback = (oembed_caption, oembed_src)
+        else:
+            debug_log.append(oembed_err)
+
+        # 2. Main Page Scraping (Full JSON)
         try:
-            response = session.get(url, headers=headers, timeout=8)
-            html = response.text
+            # UA Bytespider = crawler resmi ByteDance, dan TikTok melayaninya
+            # penuh dari IP datacenter: diuji 7 Agu 2026 atas 8 video, Bytespider
+            # 8/8 dapat halaman ~380 KB yang memuat "desc", sedangkan UA Chrome
+            # 8/8 cuma dapat bot-wall 1462 byte (inilah biang "Main:NoData" yang
+            # sering muncul di log VPS). UA browser tetap dicoba sebagai cadangan
+            # kalau suatu saat Bytespider yang diblokir.
+            html = ''
+            for _ua in (_TIKTOK_UA_BYTESPIDER, headers['User-Agent']):
+                if _tt_left(deadline) < _TIKTOK_MIN_SLICE_SEC:
+                    debug_log.append("Main:Budget")
+                    break
+                _headers = dict(headers)
+                _headers['User-Agent'] = _ua
+                _resp = _tiktok_get(url, headers=_headers, timeout=_tt_timeout(deadline, 8),
+                                    retries=1, session=session, deadline=deadline)
+                if _resp is not None and _resp.status_code == 200 and len(_resp.text) > len(html):
+                    html = _resp.text
+                if len(html) > 50000:  # halaman penuh — tak perlu coba UA lain
+                    break
+            if not html:
+                raise ValueError("empty")
 
             # Pattern 0: EARLY EXACT CODE CHECK on main HTML (Highest Reliability)
             # If the unique verification code is anywhere in the main page HTML,
@@ -213,14 +402,12 @@ def get_tiktok_caption(url, expected_code=None):
         except Exception as e: 
             debug_log.append(f"MainErr:{str(e)[:15]}")
         
-        # 4. Embed V2 Scraping (Fallback) - Good for getting full caption with hashtags
-        video_id = None
-        match = re.search(r'/video/(\d+)', url)
-        if not match: match = re.search(r'/photo/(\d+)', url)
-        
-        if match:
-            video_id = match.group(1)
-            embed_html = get_tiktok_embed_html(video_id)
+        # 3. Embed V2 Scraping — sekarang PALING AKHIR sebelum TikWM, karena
+        # endpoint inilah yang kena overload-protect. Sudah ber-retry/backoff di
+        # get_tiktok_embed_html(); tetap dipertahankan karena DOM-nya kadang
+        # memuat caption penuh saat sumber lain cuma kasih potongan.
+        if video_id and _tt_left(deadline) >= _TIKTOK_MIN_SLICE_SEC:
+            embed_html = get_tiktok_embed_html(video_id, deadline)
             if embed_html:
                 # Pattern 0: EARLY EXACT CODE CHECK (Most Reliable - Bypasses pattern fragility)
                 # If the unique code is present anywhere in the embed HTML, the user
@@ -324,26 +511,29 @@ def get_tiktok_caption(url, expected_code=None):
                 if desc_fallback:
                     return desc_fallback.group(1), "TikTok:Embed-RawDesc"
                 
-        # 4. oEmbed Scraping (Fallback - Often truncated)
-        caption, src, oembed_err = get_tiktok_oembed(url)
-        if caption:
-            cap_lower = caption.lower()
-            if not any(p.lower() in cap_lower for p in garbage_phrases):
-                return caption, src
-            else:
-                debug_log.append("oEmbed:Garbage")
-        else:
-            debug_log.append(oembed_err)
-        
-        # 5. TikWM API (Aggressive Fallback for Restricted Content)
+        # 4. TikWM API (Aggressive Fallback for Restricted Content)
         # This is a high-success bypass for age-restricted or hidden captions
-        caption, src = get_tiktok_tikwm(url)
+        if _tt_left(deadline) < _TIKTOK_MIN_SLICE_SEC:
+            debug_log.append("TikWM:Budget")
+            caption, src = None, None
+        else:
+            caption, src = get_tiktok_tikwm(url, deadline)
         if caption:
             cap_lower = caption.lower()
-            if not any(p.lower() in cap_lower for p in garbage_phrases):
-                return caption, src
-            else:
+            if any(p.lower() in cap_lower for p in garbage_phrases):
                 debug_log.append("TikWM:Garbage")
+            elif expected_code and expected_code.lower() in cap_lower:
+                return caption, src
+            elif oembed_fallback is None:
+                # Sama-sama tanpa kode: oEmbed (resmi) lebih dipercaya daripada
+                # mirror pihak ketiga, jadi TikWM cuma dipakai kalau oEmbed kosong.
+                oembed_fallback = (caption, src)
+
+        # Tidak ada sumber yang memuat kode. Balikin caption cadangan (kalau ada)
+        # supaya pemanggil tetap lihat caption asli — penting buat includeCaption
+        # (moderasi AI) & buat aturan risky_sources/fail-open di handler.
+        if oembed_fallback:
+            return oembed_fallback
 
         return None, f"TikTok:None|Log:{','.join(debug_log)}"
     except Exception as e: 
