@@ -56,6 +56,10 @@ MIN_FIRST_CLAIM_VIEWS = 500
 # supaya budget kampanye nggak nyangkut. Sumber: STALE_DAYS di
 # src/screens/StaleContentReviewScreen.js.
 STALE_REVIEW_DAYS = 2
+# Sanksi moderasi: kelipatan penolakan yang memicu suspend, dan lamanya.
+# Sumber: functions/src/moderationAutomation.js (totalRejections % 8).
+MODERATION_STRIKE_LIMIT = 8
+MODERATION_SUSPEND_DAYS = 3
 MAX_RESUBMIT = 2
 CLAIM_REJECT_BLOCK_LIMIT = 3
 
@@ -183,13 +187,19 @@ FACTS = [
         id="all.account_access",
         roles="all",
         topic="akun",
+        # Tiap kalimat di bawah dicek langsung ke LoginScreen.js:
+        #   :130 gerbang reCAPTCHA  ·  :138 gerbang emailVerified
+        #   :181 kirim ulang tautan ·  :244 tautan lupa password
         source="src/screens/LoginScreen.js",
         text=(
-            "Nggak bisa masuk: pastikan emailnya sudah diverifikasi lewat tautan "
-            "yang dikirim waktu daftar (cek folder spam). Lupa password bisa "
-            "direset sendiri dari layar masuk. Kalau login pakai Google, pakai "
-            "akun Google yang sama dengan waktu daftar, karena masuk dengan "
-            "email berbeda bikin akun baru yang kosong, bukan membuka akun lama."
+            "Nggak bisa masuk, urutan yang paling sering jadi sebabnya: "
+            "(1) emailnya belum diverifikasi. Login memang ditahan sampai tautan "
+            "verifikasi yang dikirim waktu daftar diklik, jadi cek inbox dan "
+            "folder spam. Tautannya bisa diminta ulang dari layar masuk. "
+            "(2) di web, kotak reCAPTCHA di atas tombol masuk harus diselesaikan "
+            "dulu. (3) lupa password bisa direset sendiri lewat tautan Lupa "
+            "password di layar masuk. Kalau daftarnya pakai Google, masuknya "
+            "juga harus pakai akun Google yang sama."
         ),
     ),
     dict(
@@ -215,6 +225,171 @@ FACTS = [
             "dari budget kampanye itu. Langkah pertamanya buka menu Kampanye, "
             "baca briefnya, lalu daftar. Nggak ada biaya pendaftaran dan nggak "
             "ada target minimal yang bikin kena denda."
+        ),
+    ),
+    dict(
+        id="creator.claim_one_at_a_time",
+        roles="creator",
+        topic="klaim",
+        source="src/screens/ClaimViewsScreen.js",
+        text=(
+            "Satu konten cuma boleh punya SATU klaim yang lagi berjalan. Selama "
+            "klaim sebelumnya belum selesai direview, kamu nggak bisa kirim "
+            "klaim baru buat konten yang sama. Views yang bertambah selama nunggu "
+            "TIDAK hangus, semuanya tetap kehitung di klaim berikutnya."
+        ),
+    ),
+    dict(
+        id="creator.claim_bot",
+        roles="creator",
+        topic="klaim",
+        source="src/screens/ClaimHistoryScreen.js",
+        text=(
+            "Kalau klaim berstatus 'Terdeteksi bot', artinya sistem menemukan "
+            "tanda aktivitas bot di konten itu dan klaimnya nggak bisa diproses. "
+            "Yang paling sering memicunya: views naik sangat cepat dalam waktu "
+            "pendek, atau engagement yang polanya nggak wajar. Kalau kamu yakin "
+            "viewsnya organik, ajukan banding dan siapkan rekaman analitiknya."
+        ),
+    ),
+    dict(
+        id="creator.banding",
+        roles="creator",
+        topic="klaim",
+        source="src/screens/ClaimHistoryScreen.js",
+        text=(
+            "Klaim yang ditolak bisa dibanding lewat menu Riwayat klaim. "
+            "Bandingnya diperiksa tim Wefluence, jadi tunggu hasilnya dan jangan "
+            "kirim klaim baru buat konten itu selama banding masih jalan. Kalau "
+            "banding ditolak, kamu masih bisa klaim ulang setelah 7 hari dengan "
+            "melampirkan bukti analitik."
+        ),
+    ),
+    dict(
+        id="creator.views_manual",
+        roles="creator",
+        topic="klaim",
+        source="src/screens/ClaimViewsScreen.js",
+        text=(
+            "Kadang sistem nggak bisa membaca views kamu otomatis, biasanya waktu "
+            "TikTok atau Instagram lagi ramai. Kalau itu terjadi, angkanya diisi "
+            "manual saja sesuai yang kelihatan di sosmed, dan klaimnya tetap "
+            "diproses seperti biasa. Instagram memang belum didukung untuk "
+            "pindai otomatis, jadi konten IG selalu diisi manual."
+        ),
+    ),
+    dict(
+        id="creator.budget_out",
+        roles="creator",
+        topic="klaim",
+        source="src/screens/CampaignDetailScreen.js",
+        text=(
+            "Kalau budget kampanye habis, kontenmu berhenti menghasilkan di "
+            "kampanye itu walaupun viewsnya masih naik. Ini bukan penalti, "
+            "memang dananya sudah terpakai semua. Klaim yang sudah disetujui "
+            "sebelumnya tetap dibayar. Kalau mau lanjut, cari kampanye lain yang "
+            "budgetnya masih ada."
+        ),
+    ),
+    dict(
+        id="creator.keep_public",
+        roles="creator",
+        topic="konten",
+        source="src/screens/CampaignDetailScreen.js",
+        text=(
+            "Kontennya wajib tetap PUBLIK sampai kampanyenya selesai. Diprivat "
+            "atau di-archive di sosmed bikin viewsnya nggak bisa diverifikasi, "
+            "dan klaimnya jadi gagal."
+        ),
+    ),
+    dict(
+        id="creator.payout_cap",
+        roles="creator",
+        topic="klaim",
+        source="src/screens/CampaignDetailScreen.js",
+        text=(
+            "Sebagian kampanye memasang batas maksimal bayaran per kreator. "
+            "Kalau ada, angkanya ditulis di halaman kampanyenya. Setelah batas "
+            "itu tercapai, views yang bertambah nggak nambah bayaran lagi di "
+            "kampanye tersebut."
+        ),
+    ),
+    dict(
+        id="creator.moderation_strike",
+        roles="creator",
+        topic="aturan",
+        source="functions/src/moderationAutomation.js",
+        text=(
+            "Kalau kontenmu ditolak moderasi sampai "
+            + str(MODERATION_STRIKE_LIMIT) + " kali, akunnya disuspend "
+            + str(MODERATION_SUSPEND_DAYS) + " hari dan selama itu kamu nggak "
+            "bisa mengirim konten. Ini beda dari blokir permanen: yang permanen "
+            "itu buat kecurangan views. Cara menghindarinya cuma satu, baca "
+            "alasan penolakan sebelum kirim lagi."
+        ),
+    ),
+    dict(
+        id="creator.reimburse",
+        roles="creator",
+        topic="alur",
+        source="src/screens/CampaignDetailScreen.js",
+        text=(
+            "Sebagian kampanye punya Program Reimburse Belanja Kreator: kamu "
+            "beli produknya sendiri dulu, lalu uangnya diganti sampai batas yang "
+            "ditentukan brand. Kalau kampanyenya pakai program ini, halamannya "
+            "menyebut toko mana saja yang diizinkan dan berapa maksimal "
+            "penggantiannya. Struk belanjanya diunggah untuk diverifikasi, dan "
+            "penggantiannya terpisah dari bayaran views."
+        ),
+    ),
+    dict(
+        id="creator.withdraw_blocked",
+        roles="creator",
+        topic="uang",
+        source="src/screens/WithdrawScreen.js",
+        text=(
+            "Kalau muncul 'Akun kamu lagi dibatasi, jadi penarikan belum bisa "
+            "diproses', itu artinya akunnya sedang ditahan tim Wefluence, bukan "
+            "gangguan teknis. Saldonya nggak hilang. Ini cuma bisa dibuka admin, "
+            "jadi tanyakan langsung alasannya lewat chat ini."
+        ),
+    ),
+    dict(
+        id="brand.create_rules",
+        roles="brand",
+        topic="alur",
+        source="src/screens/CreateCampaignScreen.js",
+        text=(
+            "Waktu bikin kampanye, yang wajib diisi: tarif atau harga per video, "
+            "gambar kampanye, minimal satu platform target, dan tanggal berakhir "
+            "yang valid. Untuk clipping, minimal satu link video sumber juga "
+            "wajib. Ada jeda 5 menit antara membuat satu kampanye dan kampanye "
+            "berikutnya."
+        ),
+    ),
+    dict(
+        id="brand.topup_flow",
+        roles="brand",
+        topic="budget",
+        source="src/screens/TopUpScreen.js",
+        text=(
+            "Isi saldo sekarang lewat transfer manual: layar top up menampilkan "
+            "nomor rekening dan jumlah persis yang harus ditransfer, lalu admin "
+            "mengonfirmasi. Transfer angka yang PERSIS sama supaya gampang "
+            "dicocokkan. Gerbang pembayaran otomatis belum aktif."
+        ),
+    ),
+    dict(
+        id="brand.reimburse",
+        roles="brand",
+        topic="budget",
+        source="src/screens/CreateCampaignScreen.js",
+        text=(
+            "Program Reimburse Belanja Kreator: brand mengganti uang belanja "
+            "produk kreator sampai batas per kreator yang ditentukan. Total "
+            "budget reimburse harus lebih besar dari harga produk maksimal, dan "
+            "toko yang diizinkan wajib dipilih. Budget reimburse terpisah dari "
+            "budget views."
         ),
     ),
     # --- Dasar platform ----------------------------------------------------
@@ -267,7 +442,9 @@ FACTS = [
         roles="all",
         topic="dasar",
         source="src/screens/CampaignTypeSelectorScreen.js",
-        released=False,
+        # Gembok dilepas 21 Agu 2026: kalimat UI-nya sudah ada di layar
+        # yang dikirim ke pengguna (CreateCampaignScreen: "Harga per video wajib diisi"), jadi fiturnya memang tayang.
+        
         text=(
             "Ada dua model bayar. Per views: kreator dibayar per 1.000 views, makin "
             "banyak views makin besar bayarannya. Per video: brand bayar harga tetap "
@@ -483,7 +660,9 @@ FACTS = [
         roles="creator",
         topic="klaim",
         source="src/utils/claimBlock.js",
-        released=False,
+        # Gembok dilepas 21 Agu 2026: kalimat UI-nya sudah ada di layar
+        # yang dikirim ke pengguna (ClaimViewsScreen: "sudah ditolak 3 kali, jadi kontennya dikunci"), jadi fiturnya memang tayang.
+        
         text=(
             "Kalau klaim untuk satu konten ditolak " + str(CLAIM_REJECT_BLOCK_LIMIT)
             + " kali beruntun tanpa ada yang disetujui di antaranya, konten itu dikunci "
@@ -496,7 +675,9 @@ FACTS = [
         roles="creator",
         topic="klaim",
         source="src/screens/ClaimViewsScreen.js",
-        released=False,
+        # Gembok dilepas 21 Agu 2026: kalimat UI-nya sudah ada di layar
+        # yang dikirim ke pengguna (ClaimViewsScreen: "IG belum bisa Auto-Klaim"), jadi fiturnya memang tayang.
+        
         text=(
             "Ada tombol pindai semua di layar klaim: sistem mengecek semua konten kamu "
             "yang aktif sekaligus, lalu yang punya views baru bisa diklaim dalam sekali "

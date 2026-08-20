@@ -420,13 +420,28 @@ class TestPengetahuan(unittest.TestCase):
         self.assertAlmostEqual(knowledge.ladder_rate_for(900_000_000), 0.10)
 
     def test_fakta_belum_rilis_disembunyikan(self):
+        """Gerbangnya diuji lewat fakta MANA PUN yang masih bertanda
+        released=False, bukan lewat id yang ditulis tangan.
+
+        Versi lama memaku `creator.claim_block`, dan waktu fitur itu benar-benar
+        tayang lalu gemboknya dilepas, uji ini gagal padahal yang diujinya
+        (mekanisme gerbangnya) masih bekerja sempurna. Uji yang pecah karena
+        perubahan yang BENAR itu uji yang lama-lama diabaikan orang.
+        """
+        digembok = [f["id"] for f in knowledge.FACTS if not f.get("released", True)]
+        if not digembok:
+            self.skipTest("nggak ada fakta yang digembok saat ini")
+        target = digembok[0]
+        peran = knowledge.FACTS[
+            next(i for i, f in enumerate(knowledge.FACTS) if f["id"] == target)
+        ].get("roles", "all")
+        peran = peran if peran in ("creator", "brand") else "creator"
+
         os.environ.pop("KB_INCLUDE_UNRELEASED", None)
-        ids = {f["id"] for f in knowledge.facts_for("creator")}
-        self.assertNotIn("creator.claim_block", ids)
+        self.assertNotIn(target, {f["id"] for f in knowledge.facts_for(peran)})
         os.environ["KB_INCLUDE_UNRELEASED"] = "1"
         try:
-            ids = {f["id"] for f in knowledge.facts_for("creator")}
-            self.assertIn("creator.claim_block", ids)
+            self.assertIn(target, {f["id"] for f in knowledge.facts_for(peran)})
         finally:
             os.environ.pop("KB_INCLUDE_UNRELEASED", None)
 

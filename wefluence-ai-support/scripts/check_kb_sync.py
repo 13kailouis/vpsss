@@ -143,6 +143,12 @@ check(
     knowledge.STALE_REVIEW_DAYS,
 )
 check(
+    "kelipatan tolak moderasi -> suspend",
+    "functions/src/moderationAutomation.js",
+    r"totalRejections % (\d+) === 0",
+    knowledge.MODERATION_STRIKE_LIMIT,
+)
+check(
     "batas tolak beruntun klaim",
     "src/utils/claimBlock.js",
     r"CLAIM_REJECT_BLOCK_LIMIT\s*=\s*(\d+)",
