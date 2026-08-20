@@ -68,19 +68,27 @@ GROQ_BASE_URL = _s("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MODELS = [
     m.strip() for m in _s(
         "GROQ_MODELS",
-        # URUTANNYA PENTING, DAN ALASANNYA BUKAN SELERA.
+        # DAFTAR INI DICOCOKKAN KE AKUN GROQ SUNGGUHAN, 21 Agu 2026.
         #
-        # `openai/gpt-oss-120b` itu model REASONING: dia menghabiskan token buat
-        # berpikir dulu sebelum menjawab. Waktu dia ditaruh paling depan dengan
-        # LLM_MAX_TOKENS 500, jatah tokennya habis di tahap berpikir dan yang
-        # sampai ke pengguna cuma potongan - persis keluhan "Ini t t t... ? ...
-        # ... ..." yang muncul di produksi. Model yang menjawab langsung ditaruh
-        # duluan; yang reasoning tetap disimpan sebagai cadangan karena
-        # jawabannya bagus kalau dikasih ruang.
-        "moonshotai/kimi-k2-instruct,"
-        "llama-3.3-70b-versatile,"
+        # Groq sudah MENGHAPUS seluruh keluarga llama (llama-3.3-70b-versatile,
+        # llama-3.1-8b-instant) dan moonshotai/kimi-k2-instruct dari akun ini.
+        # Yang tersisa dan layak dipakai buat chat cuma keluarga gpt-oss dan
+        # qwen. Diperiksa lewat `GET /api/health?probe=1` -> `groq_terdaftar`,
+        # bukan dari ingatan.
+        #
+        # KONSEKUENSI YANG HARUS DIINGAT: semuanya model REASONING. Mereka
+        # menghabiskan token buat berpikir sebelum menjawab, jadi dua pengaman
+        # di bawah ini WAJIB tetap ada, bukan opsional:
+        #   - LLM_MAX_TOKENS longgar (900), supaya jawabannya nggak terpotong
+        #     jadi potongan kata seperti "Ini t t t... ? ... ... ..."
+        #   - `reasoning_format: hidden` di llm.py buat model gpt-oss
+        #   - `_looks_degenerate()` sebagai jaring terakhir
+        #
+        # `groq/compound*` sengaja TIDAK dipakai: itu sistem agentik dengan
+        # perkakasnya sendiri, dan layar ini butuh tool calling versi kita.
         "openai/gpt-oss-120b,"
-        "llama-3.1-8b-instant",
+        "qwen/qwen3.6-27b,"
+        "openai/gpt-oss-20b",
     ).split(",") if m.strip()
 ]
 

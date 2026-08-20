@@ -19,7 +19,35 @@ cd "$(dirname "$0")"
 SERVICES=("$@")
 
 echo "[1/4] Pulling latest code..."
-git pull --ff-only origin main || echo "(skipped - not a git repo or no remote)"
+# Kenapa serumit ini: versi lamanya `git pull ... || echo "(skipped)"`, dan itu
+# menelan SEMUA kegagalan. Pull yang diblokir perubahan lokal, konflik, atau
+# jaringan mati semuanya dilaporkan sebagai "skipped", lalu deploy jalan terus
+# dan membangun ulang KODE LAMA. Hasilnya deploy yang bilang "berhasil" tanpa
+# benar-benar men-deploy apa pun - kegagalan paling mahal karena tidak terlihat.
+#
+# Jadi dibedakan dua hal yang berbeda:
+#   - bukan repo git / tanpa remote  -> memang wajar dilewati, lanjut
+#   - pull dicoba lalu GAGAL         -> berhenti, dengan alasannya dicetak
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "(dilewati - ini bukan repo git)"
+elif ! git remote get-url origin >/dev/null 2>&1; then
+    echo "(dilewati - remote 'origin' tidak ada)"
+else
+    if ! pull_output=$(git pull --ff-only origin main 2>&1); then
+        echo ""
+        echo "DEPLOY DIHENTIKAN: git pull gagal."
+        echo "------------------------------------------------------------"
+        echo "$pull_output"
+        echo "------------------------------------------------------------"
+        echo "Kode di server MASIH VERSI LAMA. Tidak ada yang di-deploy."
+        echo ""
+        echo "Kalau penyebabnya perubahan lokal yang menghalangi:"
+        echo "    git status                 # lihat berkas mana"
+        echo "    git checkout -- <berkas>   # buang perubahan itu, lalu ulangi"
+        exit 1
+    fi
+    echo "$pull_output"
+fi
 
 if [ ${#SERVICES[@]} -eq 0 ]; then
     echo "[2/4] Rebuilding ALL containers..."
