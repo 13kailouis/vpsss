@@ -2,7 +2,13 @@
 PENYEDIA MODEL
 ==============
 
-Rantai: GROQ_MODEL -> GROQ_MODEL_FALLBACK -> Gemini.
+Rantai: daftar model Groq (disaring ke yang benar-benar hidup) -> Gemini.
+
+Nama model di Groq PUNYA MASA HIDUP. `llama-3.3-70b-versatile` yang dulu dipatok
+di config akhirnya dihapus Groq, dan sejak itu tiap permintaan dijawab HTTP 404 -
+berbulan-bulan, tanpa ada yang tahu, karena gejalanya kelihatan seperti gangguan
+sementara. Karena itu model sekarang dipilih dari daftar yang ditanyakan langsung
+ke Groq (`available_groq_models`), bukan dari nama yang ditulis tangan.
 
 Versi lama satu baris:
 
@@ -28,6 +34,7 @@ pertanyaan data yang paling umum, dengan satu alur yang harus dijaga.
 """
 
 import json
+import threading
 import time
 
 import requests
@@ -36,6 +43,9 @@ from . import config, tools
 from .logging_setup import get
 
 log = get(__name__)
+
+_models_cache = {"at": 0.0, "ids": None}
+_models_lock = threading.Lock()
 
 _session = requests.Session()
 _adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=16)
@@ -106,6 +116,64 @@ def _post_with_retry(url, headers, payload, label):
         if attempt < config.LLM_MAX_RETRIES:
             time.sleep(0.4 * (2 ** attempt))
     raise LLMUnavailable(label + ": " + last)
+
+
+# ---------------------------------------------------------------------------
+# Model mana yang benar-benar ada
+# ---------------------------------------------------------------------------
+
+def available_groq_models(force=False):
+    """Set id model yang hidup di akun Groq, atau None kalau nggak bisa dicek.
+
+    None dan set kosong ARTINYA BEDA, dan bedanya penting: None = "nggak tahu"
+    (jaringan gagal, kunci salah), dan waktu nggak tahu kita TIDAK boleh
+    menyaring apa pun, karena menyaring dengan pengetahuan kosong sama saja
+    dengan membuang semua model. Set kosong = "sudah dicek, memang nggak ada".
+    """
+    now = time.time()
+    with _models_lock:
+        fresh = now - _models_cache["at"] < config.GROQ_MODELS_TTL
+        if not force and fresh and _models_cache["ids"] is not None:
+            return _models_cache["ids"]
+
+    if not config.GROQ_API_KEY:
+        return None
+    try:
+        resp = _session.get(
+            config.GROQ_BASE_URL.rstrip("/") + "/models",
+            headers={"Authorization": "Bearer " + config.GROQ_API_KEY},
+            timeout=_timeout(),
+        )
+        if resp.status_code != 200:
+            log.warning("llm.models_list_failed", extra={"status": resp.status_code})
+            return None
+        ids = {m.get("id") for m in (resp.json().get("data") or []) if m.get("id")}
+    except (requests.RequestException, ValueError):
+        log.warning("llm.models_list_error", exc_info=True)
+        return None
+
+    with _models_lock:
+        _models_cache["at"] = now
+        _models_cache["ids"] = ids
+    return ids
+
+
+def groq_chain():
+    """Urutan model yang dipakai hari ini: pilihan kita, disaring yang hidup."""
+    prefer = config.groq_preference()
+    live = available_groq_models()
+    if not live:
+        # Nggak tahu mana yang hidup: jalan apa adanya. Lebih baik mencoba dan
+        # gagal di satu model daripada nggak mencoba sama sekali.
+        return prefer
+    usable = [m for m in prefer if m in live]
+    dropped = [m for m in prefer if m not in live]
+    if dropped:
+        # Ini peringatan dininya. Kalau baris ini muncul, ada nama model di
+        # konfigurasi yang sudah dipensiunkan Groq - dan dulu justru inilah yang
+        # nggak pernah kelihatan sampai semuanya buntu.
+        log.warning("llm.models_retired", extra={"dropped": dropped, "usable": usable})
+    return usable or prefer
 
 
 # ---------------------------------------------------------------------------
@@ -267,10 +335,7 @@ def complete(system_prompt, history, user_text, tool_specs, uid, ctx):
     attempts = []
 
     if config.GROQ_API_KEY:
-        models = [config.GROQ_MODEL]
-        if config.GROQ_MODEL_FALLBACK and config.GROQ_MODEL_FALLBACK != config.GROQ_MODEL:
-            models.append(config.GROQ_MODEL_FALLBACK)
-        for model in models:
+        for model in groq_chain():
             try:
                 return _run_groq(
                     model, system_prompt, history, user_text, tool_specs, uid, ctx
@@ -297,10 +362,13 @@ def probe():
     out = {}
     ping = [{"role": "user", "content": "balas satu kata: ok"}]
 
-    for label, model in (
-        ("groq_primary", config.GROQ_MODEL),
-        ("groq_fallback", config.GROQ_MODEL_FALLBACK),
-    ):
+    live = available_groq_models(force=True)
+    out["groq_terdaftar"] = sorted(live)[:40] if live else "tidak bisa dicek"
+    chain = groq_chain()
+    out["groq_urutan_dipakai"] = chain
+
+    for i, model in enumerate(chain[:3]):
+        label = "groq_%d_%s" % (i + 1, model.split("/")[-1])
         if not config.GROQ_API_KEY or not model:
             out[label] = {"ok": False, "detail": "tidak dikonfigurasi"}
             continue

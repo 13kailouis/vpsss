@@ -106,8 +106,10 @@ def health():
         "providers": {
             "groq": {
                 "configured": bool(config.GROQ_API_KEY),
-                "model": config.GROQ_MODEL,
-                "fallback": config.GROQ_MODEL_FALLBACK,
+                # Urutan yang BENAR-BENAR dipakai hari ini, sesudah nama yang
+                # sudah dipensiunkan Groq dibuang. Kalau di sini isinya beda
+                # dengan yang ditulis di .env, itu jawabannya.
+                "chain": llm.groq_chain(),
             },
             "gemini": {
                 "configured": bool(config.GEMINI_API_KEY),

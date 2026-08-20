@@ -48,13 +48,51 @@ def _b(name, default=False):
 # (tool calling); Gemini sengaja dipakai TANPA alat, dia cuma menerima ringkasan
 # data user yang sudah diambil duluan. Lihat llm.py bagian "kenapa Gemini tanpa alat".
 #
-# Default GROQ_MODEL sengaja dibiarkan sama dengan yang sudah jalan di produksi.
-# Model yang lebih pintar (kimi-k2 / gpt-oss-120b) tinggal diisi lewat .env dan
-# diuji dulu dengan: curl "http://127.0.0.1:8000/api/health?probe=1"
+# KENAPA INI DAFTAR, BUKAN SATU NAMA
+# ----------------------------------
+# Nama model di Groq PUNYA MASA HIDUP. `llama-3.3-70b-versatile` yang dulu
+# ditulis di sini akhirnya dihapus Groq, dan sejak itu setiap permintaan dijawab
+# HTTP 404. Versi lama service ini nggak punya cadangan, jadi tiap pesan buntu
+# dengan "sistem AI sedang sibuk" - selama berbulan-bulan, dan nggak ada yang
+# tahu karena gejalanya kelihatan seperti gangguan sementara.
+#
+# Jadi yang dipatok di sini bukan satu nama, tapi URUTAN PILIHAN. Waktu jalan,
+# daftar ini disaring dulu terhadap model yang BENAR-BENAR ada di akun Groq
+# (lihat `available_groq_models` di llm.py), jadi nama yang sudah dipensiunkan
+# dilewati sendiri, bukan dipakai lalu gagal.
+#
+# Urutannya dari yang paling diinginkan. Tambahkan nama baru di DEPAN kalau mau
+# mencoba model lain; yang mati di belakangnya nggak perlu dihapus buru-buru.
 GROQ_API_KEY = _s("GROQ_API_KEY")
 GROQ_BASE_URL = _s("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-GROQ_MODEL = _s("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_MODEL_FALLBACK = _s("GROQ_MODEL_FALLBACK", "openai/gpt-oss-120b")
+GROQ_MODELS = [
+    m.strip() for m in _s(
+        "GROQ_MODELS",
+        "openai/gpt-oss-120b,"
+        "moonshotai/kimi-k2-instruct,"
+        "llama-3.3-70b-versatile,"
+        "llama-3.1-8b-instant",
+    ).split(",") if m.strip()
+]
+
+# Dipertahankan supaya .env lama yang menyetel dua variabel ini tetap dihormati.
+# Kalau diisi, dia naik ke DEPAN daftar di atas.
+GROQ_MODEL = _s("GROQ_MODEL")
+GROQ_MODEL_FALLBACK = _s("GROQ_MODEL_FALLBACK")
+
+
+def groq_preference():
+    """Urutan model yang mau dicoba, tanpa duplikat, tanpa yang kosong."""
+    out = []
+    for m in [GROQ_MODEL, GROQ_MODEL_FALLBACK] + GROQ_MODELS:
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
+# Berapa lama daftar model hidup di-cache (detik). Model nggak muncul dan hilang
+# tiap menit, jadi sejam sudah lebih dari cukup dan biayanya satu panggilan.
+GROQ_MODELS_TTL = _i("GROQ_MODELS_TTL", 3600)
 
 GEMINI_API_KEY = _s("GEMINI_API_KEY")
 GEMINI_BASE_URL = _s(

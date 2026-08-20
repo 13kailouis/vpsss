@@ -501,7 +501,12 @@ class TestPutaranAlat(unittest.TestCase):
         self._post = llm._post_with_retry
         self._run = llm.tools.run
         self._key = config.GROQ_API_KEY
+        self._avail = llm.available_groq_models
         config.GROQ_API_KEY = "kunci-uji"
+        # Daftar model hidup TIDAK boleh diambil dari jaringan waktu uji.
+        # None = "nggak tahu mana yang hidup", dan di keadaan itu rantainya
+        # dipakai apa adanya - persis yang mau diuji di sini.
+        llm.available_groq_models = lambda force=False: None
         self.tool_calls = []
 
         def fake_run(name, args, uid, ctx):
@@ -517,6 +522,7 @@ class TestPutaranAlat(unittest.TestCase):
     def tearDown(self):
         self.llm._post_with_retry = self._post
         self.llm.tools.run = self._run
+        self.llm.available_groq_models = self._avail
         self.config.GROQ_API_KEY = self._key
 
     def _script(self, *responses):
@@ -633,7 +639,10 @@ class TestPutaranAlat(unittest.TestCase):
             hasil = self.llm.complete("prompt", [], "halo", None, "uid-g", {"role": "unknown"})
             self.assertEqual(hasil.provider, "gemini")
             self.assertEqual(hasil.text, "Dari cadangan.")
-            self.assertEqual(len(panggilan), 3)  # 2 model groq + 1 gemini
+            # Semua model Groq dicoba dulu, baru Gemini. Panjang rantainya
+            # dihitung, bukan dipatok angka - kalau tidak, uji ini pecah tiap
+            # kali daftar model di config ditambah.
+            self.assertEqual(len(panggilan), len(self.llm.groq_chain()) + 1)
         finally:
             config.GEMINI_API_KEY = asli
 
