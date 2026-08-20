@@ -28,7 +28,7 @@ if [ ${#SERVICES[@]} -eq 0 ]; then
     echo "[3/4] Restarting ALL services..."
     docker compose up -d --remove-orphans
 
-    HEALTH=(caption-scraper matrix-scrapper)
+    HEALTH=(caption-scraper matrix-scrapper ai-support)
 else
     echo "[2/4] Rebuilding (targeted): ${SERVICES[*]} ..."
     docker compose build "${SERVICES[@]}"

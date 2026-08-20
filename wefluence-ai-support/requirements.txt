@@ -1,6 +1,10 @@
+# Dipatok persis (==) supaya rebuild di VPS menghasilkan image yang sama dengan
+# yang diuji. Jangan pakai >= di sini: `docker compose build --pull` dijalankan
+# berbulan-bulan setelah terakhir kali kode ini disentuh, dan rilis mayor
+# dependensi yang masuk diam-diam akan terlihat sebagai "AI-nya tiba-tiba rusak".
 flask==3.0.3
 gunicorn==22.0.0
-firebase-admin==6.2.0
-google-cloud-firestore==2.16.0
-requests==2.31.0
-python-dotenv==1.0.0
+firebase-admin==6.5.0
+google-cloud-firestore==2.16.1
+requests==2.32.3
+python-dotenv==1.0.1

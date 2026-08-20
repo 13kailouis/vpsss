@@ -67,6 +67,15 @@ services:
     restart: unless-stopped
     expose:
       - "8000"
+    # SEMUA konfigurasi service ini lewat env_file, bukan lewat blok
+    # `environment` di bawah. Daftar lengkapnya beserta penjelasannya ada di
+    # wefluence-ai-support/.env.example. Yang wajib: GROQ_API_KEY dan
+    # FIREBASE_SERVICE_ACCOUNT. Yang sangat disarankan: GEMINI_API_KEY, karena
+    # itu jalur cadangan waktu Groq mati atau kena batas.
+    #
+    # Sakelar yang perlu diingat:
+    #   REQUIRE_AUTH=1           nyalakan SETELAH patch klien web + mobile tayang
+    #   KB_INCLUDE_UNRELEASED=1  nyalakan setelah fitur 2026 benar-benar tayang
     env_file:
       - ./wefluence-ai-support/.env
     environment:
