@@ -52,6 +52,10 @@ MIN_PAYOUT_PER_1000_UGC = 5000
 CAMPAIGN_TOPUP_FEE_RATE = 0.10
 
 MIN_FIRST_CLAIM_VIEWS = 500
+# Batas "konten nggak ditinjau brand". Lewat ini, admin boleh menolak massal
+# supaya budget kampanye nggak nyangkut. Sumber: STALE_DAYS di
+# src/screens/StaleContentReviewScreen.js.
+STALE_REVIEW_DAYS = 2
 MAX_RESUBMIT = 2
 CLAIM_REJECT_BLOCK_LIMIT = 3
 
@@ -117,6 +121,102 @@ def _ladder_text():
 # roles: "creator" / "brand" / "all". Fakta "all" masuk ke semua peran.
 
 FACTS = [
+    dict(
+        id="creator.review_slow",
+        roles="creator",
+        topic="konten",
+        source="src/screens/StaleContentReviewScreen.js",
+        text=(
+            "Kalau brand nggak juga meninjau kontenmu lewat "
+            + str(STALE_REVIEW_DAYS) + " hari, tim Wefluence boleh menolaknya "
+            "massal supaya budget kampanyenya nggak nyangkut kelamaan. Kalau itu "
+            "terjadi, alasannya ditulis 'tidak direview dalam "
+            + str(STALE_REVIEW_DAYS) + " hari' dan itu BUKAN karena kontenmu "
+            "jelek. Kamu masih bisa kirim ulang atau ikut kampanye lain. Nggak "
+            "ada cara mempercepat brand, dan Wefluence nggak bisa memutuskan "
+            "menggantikan brand."
+        ),
+    ),
+    dict(
+        id="creator.multi_platform",
+        roles="creator",
+        topic="konten",
+        source="functions/src/contentDedup.js",
+        text=(
+            "Satu video BOLEH diunggah ke beberapa platform sekaligus, misalnya "
+            "TikTok dan YouTube. Yang dihitung sistem itu LINK-nya, bukan "
+            "videonya, jadi dua platform berarti dua link dan dua-duanya bisa "
+            "dikirim. Yang nggak boleh: satu link yang sama dipakai di dua "
+            "kampanye berbeda."
+        ),
+    ),
+    dict(
+        id="creator.dont_delete",
+        roles="creator",
+        topic="konten",
+        source="src/screens/ClaimViewsApprovalScreen.js",
+        text=(
+            "JANGAN hapus atau privat kontennya di sosmed selama masih kamu "
+            "klaim, termasuk sesudah budget kampanyenya habis. Klaim views "
+            "diverifikasi dengan membuka linknya; kalau videonya sudah nggak "
+            "ada, viewsnya nggak bisa dibuktikan dan klaimnya ditolak. Kalau "
+            "cuma mau merapikan tampilan, kontennya bisa diarsipkan di menu "
+            "Portofolio, dan itu nggak menghapus videonya di sosmed."
+        ),
+    ),
+    dict(
+        id="creator.analytics_proof",
+        roles="creator",
+        topic="klaim",
+        source="src/components/AnalyticsProofSheet.js",
+        text=(
+            "Kadang tim Wefluence minta bukti analitik sebelum klaim disetujui: "
+            "rekaman layar halaman analitik kontenmu (TikTok Analytics, "
+            "Instagram Insights, atau YouTube Studio) yang memperlihatkan judul "
+            "video dan angka viewsnya. Kirimnya lewat menu Riwayat klaim, di "
+            "baris yang statusnya 'Butuh bukti analitik', ada tombolnya di situ. "
+            "Ini bukan tuduhan curang, cuma pengecekan angka. Rekam layar biasa "
+            "sudah cukup, nggak usah diedit."
+        ),
+    ),
+    dict(
+        id="all.account_access",
+        roles="all",
+        topic="akun",
+        source="src/screens/LoginScreen.js",
+        text=(
+            "Nggak bisa masuk: pastikan emailnya sudah diverifikasi lewat tautan "
+            "yang dikirim waktu daftar (cek folder spam). Lupa password bisa "
+            "direset sendiri dari layar masuk. Kalau login pakai Google, pakai "
+            "akun Google yang sama dengan waktu daftar, karena masuk dengan "
+            "email berbeda bikin akun baru yang kosong, bukan membuka akun lama."
+        ),
+    ),
+    dict(
+        id="all.contact_admin",
+        roles="all",
+        topic="dasar",
+        source="-",
+        text=(
+            "Chat ini SUDAH jalur resmi ke tim Wefluence. Kalau ada yang nggak "
+            "bisa aku selesaikan, aku teruskan ke admin dan balasannya masuk di "
+            "chat yang sama, jadi nggak perlu kirim ulang atau nyari kontak lain. "
+            "Wefluence nggak punya nomor WhatsApp pribadi buat dukungan."
+        ),
+    ),
+    dict(
+        id="creator.getting_started",
+        roles="creator",
+        topic="alur",
+        source="-",
+        text=(
+            "Buat yang baru: yang bisa dikerjakan di sini itu ambil kampanye "
+            "yang cocok, bikin videonya di akun sosmedmu sendiri, lalu dibayar "
+            "dari budget kampanye itu. Langkah pertamanya buka menu Kampanye, "
+            "baca briefnya, lalu daftar. Nggak ada biaya pendaftaran dan nggak "
+            "ada target minimal yang bikin kena denda."
+        ),
+    ),
     # --- Dasar platform ----------------------------------------------------
     dict(
         id="platform.what",

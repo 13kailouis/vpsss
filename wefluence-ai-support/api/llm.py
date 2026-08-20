@@ -58,6 +58,31 @@ class LLMUnavailable(Exception):
     pass
 
 
+def _looks_degenerate(text):
+    """Apakah balasan ini potongan rusak, bukan jawaban.
+
+    KENAPA PERLU: model yang kehabisan jatah token di tengah tahap berpikir
+    tetap mengembalikan HTTP 200. Dari sisi kode semuanya "berhasil", jadi
+    tanpa pemeriksaan ini sampah seperti "Ini t t t... ? ... ... ..." dikirim
+    apa adanya ke pengguna dan disimpan permanen di riwayat chatnya.
+
+    Yang dianggap rusak: isinya didominasi titik-titik, atau terlalu pendek
+    padahal berisi elipsis (tanda kalimat yang nggak pernah selesai). Ambangnya
+    sengaja longgar supaya jawaban pendek yang SAH ("Iya, bisa.") tetap lolos.
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    dots = t.count(".") + t.count("\u2026") * 3
+    if len(t) < 40 and ("\u2026" in t or "..." in t):
+        return True
+    if dots and dots / max(len(t), 1) > 0.28:
+        return True
+    if t.count("\u2026") >= 4:
+        return True
+    return False
+
+
 class Result:
     def __init__(self, text, provider, model, tool_names=None, escalation_reason=None):
         self.text = text
@@ -191,15 +216,30 @@ def _groq_once(model, messages, tool_specs):
         payload["tools"] = tool_specs
         payload["tool_choice"] = "auto"
 
-    data = _post_with_retry(
-        config.GROQ_BASE_URL.rstrip("/") + "/chat/completions",
-        {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + config.GROQ_API_KEY,
-        },
-        payload,
-        "groq/" + model,
-    )
+    # Model gpt-oss mengembalikan tahap berpikirnya kalau nggak diminta diam.
+    # `hidden` bikin Groq membuangnya dan cuma mengirim jawaban akhirnya, jadi
+    # jatah token nggak habis di teks yang memang nggak akan ditampilkan.
+    # Parameter ini khusus keluarga gpt-oss; dikirim ke model lain bisa ditolak
+    # 400, makanya dipagari nama model.
+    if "gpt-oss" in model:
+        payload["reasoning_format"] = "hidden"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + config.GROQ_API_KEY,
+    }
+    url = config.GROQ_BASE_URL.rstrip("/") + "/chat/completions"
+    try:
+        data = _post_with_retry(url, headers, payload, "groq/" + model)
+    except LLMUnavailable:
+        # Groq bisa saja menolak `reasoning_format` (nama parameternya berubah,
+        # atau modelnya nggak mendukung). Kalau itu penyebabnya, mencoba sekali
+        # lagi tanpa parameter itu jauh lebih baik daripada mematikan modelnya.
+        if "reasoning_format" not in payload:
+            raise
+        payload.pop("reasoning_format", None)
+        log.warning("llm.retry_without_reasoning_format", extra={"model": model})
+        data = _post_with_retry(url, headers, payload, "groq/" + model)
     choices = data.get("choices") or []
     if not choices:
         raise LLMUnavailable("groq/" + model + ": respons tanpa choices")
@@ -226,6 +266,16 @@ def _run_groq(model, system_prompt, history, user_text, tool_specs, uid, ctx):
             text = (message.get("content") or "").strip()
             if not text:
                 raise LLMUnavailable("groq/" + model + ": balasan kosong")
+            if _looks_degenerate(text):
+                # Dilempar sebagai kegagalan, BUKAN dikirim. Dengan begitu
+                # rantai penyedia lanjut ke model berikutnya, dan kalau semua
+                # gagal, chatnya diteruskan ke admin - dua-duanya jauh lebih
+                # baik daripada mengirim potongan kata ke orang yang lagi nanya.
+                log.warning(
+                    "llm.degenerate",
+                    extra={"model": model, "sample": text[:80]},
+                )
+                raise LLMUnavailable("groq/" + model + ": balasan rusak")
             return Result(text, "groq", model, used_tools, escalation_reason)
 
         messages.append(
@@ -321,6 +371,9 @@ def _run_gemini(system_prompt, history, user_text, uid, ctx):
     text = "".join(p.get("text", "") for p in parts).strip()
     if not text:
         raise LLMUnavailable("gemini: balasan kosong")
+    if _looks_degenerate(text):
+        log.warning("llm.degenerate", extra={"model": config.GEMINI_MODEL, "sample": text[:80]})
+        raise LLMUnavailable("gemini: balasan rusak")
     return Result(text, "gemini", config.GEMINI_MODEL)
 
 

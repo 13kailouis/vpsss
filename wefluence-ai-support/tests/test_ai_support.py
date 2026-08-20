@@ -315,6 +315,43 @@ class TestKeadaanChat(unittest.TestCase):
         self.assertFalse(state["adminHandling"])
 
 
+class TestBalasanRusak(unittest.TestCase):
+    """Regresi untuk sampah yang sempat terkirim ke pengguna.
+
+    Model reasoning yang kehabisan jatah token di tengah tetap mengembalikan
+    HTTP 200, jadi dari sisi kode semuanya "berhasil". Tanpa pemeriksaan ini,
+    potongan seperti "Ini t t t... ? ... ... ..." dikirim apa adanya dan
+    tersimpan permanen di riwayat chat orangnya.
+    """
+
+    def setUp(self):
+        from api.llm import _looks_degenerate
+        self.d = _looks_degenerate
+
+    def test_potongan_rusak_ditolak(self):
+        for teks in [
+            "Ini t t t… ?  … … …",
+            "Sebel ……",
+            "…",
+            "S …",
+            "",
+            "   ",
+        ]:
+            self.assertTrue(self.d(teks), repr(teks))
+
+    def test_jawaban_pendek_yang_SAH_tetap_lolos(self):
+        """Ambangnya harus longgar. Jawaban CS yang benar memang sering pendek."""
+        for teks in [
+            "Iya, bisa.",
+            "Oke.",
+            "Klaim pertama minimal 500 views ya.",
+            "Penarikan diproses 1 sampai 3 hari kerja.",
+            "Saldo kamu saat ini Rp 12.124.000. Kalau ada yang mau ditanyain lagi, bilang aja.",
+            "Coba cek menu Riwayat klaim, di baris yang statusnya Butuh bukti analitik.",
+        ]:
+            self.assertFalse(self.d(teks), repr(teks))
+
+
 class TestRiwayat(unittest.TestCase):
     def test_pesan_berperan_system_dibuang(self):
         """Riwayat ikut dikirim ke model. Kalau peran system bisa lewat, isi
@@ -639,10 +676,14 @@ class TestPutaranAlat(unittest.TestCase):
             hasil = self.llm.complete("prompt", [], "halo", None, "uid-g", {"role": "unknown"})
             self.assertEqual(hasil.provider, "gemini")
             self.assertEqual(hasil.text, "Dari cadangan.")
-            # Semua model Groq dicoba dulu, baru Gemini. Panjang rantainya
-            # dihitung, bukan dipatok angka - kalau tidak, uji ini pecah tiap
-            # kali daftar model di config ditambah.
-            self.assertEqual(len(panggilan), len(self.llm.groq_chain()) + 1)
+            # Semua model Groq dicoba dulu, baru Gemini. Yang dikunci di sini
+            # URUTANNYA, bukan jumlah panggilannya: model gpt-oss sengaja
+            # dicoba dua kali (sekali dengan `reasoning_format`, sekali tanpa),
+            # jadi mematok angka bikin uji ini pecah tiap kali rantainya atau
+            # aturan retry-nya disentuh.
+            self.assertTrue(panggilan[-1].startswith("gemini"), panggilan)
+            self.assertTrue(all(p.startswith("groq") for p in panggilan[:-1]), panggilan)
+            self.assertGreaterEqual(len(panggilan), len(self.llm.groq_chain()) + 1)
         finally:
             config.GEMINI_API_KEY = asli
 

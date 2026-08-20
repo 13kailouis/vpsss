@@ -137,6 +137,12 @@ check(
     knowledge.CAMPAIGN_TOPUP_FEE_RATE,
 )
 check(
+    "batas konten tidak ditinjau brand (hari)",
+    "src/screens/StaleContentReviewScreen.js",
+    r"STALE_DAYS\s*=\s*(\d+)",
+    knowledge.STALE_REVIEW_DAYS,
+)
+check(
     "batas tolak beruntun klaim",
     "src/utils/claimBlock.js",
     r"CLAIM_REJECT_BLOCK_LIMIT\s*=\s*(\d+)",

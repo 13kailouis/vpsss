@@ -68,9 +68,18 @@ GROQ_BASE_URL = _s("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MODELS = [
     m.strip() for m in _s(
         "GROQ_MODELS",
-        "openai/gpt-oss-120b,"
+        # URUTANNYA PENTING, DAN ALASANNYA BUKAN SELERA.
+        #
+        # `openai/gpt-oss-120b` itu model REASONING: dia menghabiskan token buat
+        # berpikir dulu sebelum menjawab. Waktu dia ditaruh paling depan dengan
+        # LLM_MAX_TOKENS 500, jatah tokennya habis di tahap berpikir dan yang
+        # sampai ke pengguna cuma potongan - persis keluhan "Ini t t t... ? ...
+        # ... ..." yang muncul di produksi. Model yang menjawab langsung ditaruh
+        # duluan; yang reasoning tetap disimpan sebagai cadangan karena
+        # jawabannya bagus kalau dikasih ruang.
         "moonshotai/kimi-k2-instruct,"
         "llama-3.3-70b-versatile,"
+        "openai/gpt-oss-120b,"
         "llama-3.1-8b-instant",
     ).split(",") if m.strip()
 ]
@@ -104,7 +113,10 @@ LLM_TIMEOUT = _f("LLM_TIMEOUT", 25.0)
 LLM_CONNECT_TIMEOUT = _f("LLM_CONNECT_TIMEOUT", 5.0)
 LLM_MAX_RETRIES = _i("LLM_MAX_RETRIES", 2)
 LLM_TEMPERATURE = _f("LLM_TEMPERATURE", 0.2)
-LLM_MAX_TOKENS = _i("LLM_MAX_TOKENS", 500)
+# Dinaikkan dari 500. Jawaban CS memang pendek, TAPI batas ini juga menampung
+# tahap berpikir model reasoning. Terlalu ketat = jawabannya terpotong di tengah
+# dan keluar sebagai potongan kata, bukan sebagai error yang kelihatan.
+LLM_MAX_TOKENS = _i("LLM_MAX_TOKENS", 900)
 
 # Berapa kali model boleh minta alat sebelum dipaksa menjawab. Tiap putaran =
 # 1 panggilan model + N baca Firestore, jadi ini pengendali biaya sekaligus
