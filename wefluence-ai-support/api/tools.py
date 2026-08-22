@@ -203,6 +203,72 @@ def cek_penarikan(uid, ctx, args):
     }
 
 
+def hitung_penarikan(uid, ctx, args):
+    """Hitung biaya penarikan dan uang yang benar-benar masuk rekening.
+
+    Kenapa ini alat, bukan dibiarkan dihitung model: 22 Agu 2026 di produksi
+    Kailouis menjawab "tarik Rp 50.000, biaya 5% (Rp 2.500), masuk Rp 47.500".
+    Kalimat KB-nya sudah menyebut lantai Rp 6.500, modelnya saja yang cuma
+    mengalikan 5%. Yang benar biaya Rp 6.500 dan masuk Rp 43.500, selisih
+    Rp 4.000 di satu penarikan terkecil. Salah hitung soal uang itu langsung
+    jadi komplain ke admin, dan bunyinya tetap meyakinkan jadi nggak ada yang
+    curiga sebelum dananya masuk.
+
+    Status penarikan pertama TIDAK ditanyakan ke model, dibaca sendiri dari
+    Firestore, karena itu yang menentukan pembebasan biaya.
+    """
+    nominal = (args or {}).get("nominal")
+    if isinstance(nominal, str):
+        nominal = nominal.replace(".", "").replace(",", "").replace("Rp", "").strip()
+    try:
+        nominal = int(float(nominal))
+    except (TypeError, ValueError):
+        return {"error": "Nominal penarikannya belum jelas. Tanya dulu mau tarik berapa."}
+    if nominal <= 0:
+        return {"error": "Nominal penarikan harus lebih dari nol."}
+
+    db = _db()
+    pertama = not _docs(
+        db.collection("withdrawals").where("userId", "==", uid), limit=1
+    )
+
+    hitung = knowledge.hitung_biaya_penarikan(nominal, penarikan_pertama=pertama)
+
+    umur = ctx.get("accountAgeDays")
+    baru = isinstance(umur, int) and umur <= knowledge.NEW_CREATOR_GRACE_DAYS
+    minimal = (
+        knowledge.MIN_WITHDRAWAL_NEW_CREATOR if baru else knowledge.MIN_WITHDRAWAL
+    )
+
+    hasil = {
+        "nominal": _rp(hitung["nominal"]),
+        "biaya": _rp(hitung["biaya"]),
+        "diterima_di_rekening": _rp(hitung["diterima"]),
+        "penarikan_pertama": pertama,
+        "minimal_penarikan": _rp(minimal),
+        "lama_proses": "1 sampai 3 hari kerja",
+    }
+    if hitung["dibebaskan"]:
+        hasil["biaya_dibebaskan"] = _rp(hitung["dibebaskan"])
+        hasil["catatan_pembebasan"] = "Penarikan pertama seumur hidup, biayanya dibebaskan."
+    elif hitung["kena_lantai"]:
+        hasil["catatan_biaya"] = (
+            "Yang dipakai biaya terkecil " + _rp(knowledge.WITHDRAWAL_FEE_FLOOR)
+            + ", bukan 5%, karena 5% dari nominal ini lebih kecil dari itu."
+        )
+    if nominal < minimal:
+        hasil["peringatan"] = (
+            "Nominal ini di bawah minimal penarikan " + _rp(minimal)
+            + ", jadi permintaannya bakal ditolak sistem."
+        )
+    saldo = ctx.get("balance")
+    if isinstance(saldo, (int, float)) and nominal > saldo:
+        hasil["peringatan_saldo"] = (
+            "Nominal ini lebih besar dari saldo sekarang (" + _rp(saldo) + ")."
+        )
+    return hasil
+
+
 def _flatten_contents(app):
     """Satu dokumen `applications` bisa memuat banyak konten di `contents[]`.
 
@@ -434,6 +500,28 @@ _REGISTRY = {
             "bertanya penarikannya sudah cair belum, kenapa lama, atau kenapa ditolak."
         ),
         parameters={"type": "object", "properties": {}},
+    ),
+    "hitung_penarikan": dict(
+        fn=hitung_penarikan,
+        roles=("creator",),
+        description=(
+            "Hitung biaya penarikan dan uang yang benar-benar masuk rekening untuk "
+            "satu nominal. WAJIB dipakai setiap kali pengguna menanyakan berapa yang "
+            "dia terima kalau menarik sekian, atau berapa biayanya. Jangan pernah "
+            "menghitungnya sendiri: biayanya bukan 5% polos, tapi mana yang lebih "
+            "besar antara 5% dan biaya terkecil, dan alat ini juga tahu apakah ini "
+            "penarikan pertamanya."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "nominal": {
+                    "type": "integer",
+                    "description": "Nominal penarikan dalam rupiah, angka polos tanpa titik.",
+                }
+            },
+            "required": ["nominal"],
+        },
     ),
     "cek_konten": dict(
         fn=cek_konten,

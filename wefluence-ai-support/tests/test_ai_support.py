@@ -454,6 +454,160 @@ class TestPengetahuan(unittest.TestCase):
         self.assertNotIn("brand.fee", ids)
 
 
+class TestBiayaPenarikan(unittest.TestCase):
+    """Regresi untuk jawaban salah yang benar-benar terkirim ke kreator.
+
+    22 Agu 2026, chat Yahya: "berapa estimasi dana masuk setelah pengajuan
+    penarikan". Jawabannya menyebut lantai Rp 6.500 dengan benar di kalimat
+    aturannya, lalu di contohnya menulis "tarik Rp 50.000, dipotong 5%
+    (Rp 2.500), terima Rp 47.500". Aturan benar, aritmatika salah, dan hasilnya
+    terdengar sama meyakinkannya.
+    """
+
+    def test_lantai_menang_di_nominal_kecil(self):
+        h = knowledge.hitung_biaya_penarikan(50000)
+        self.assertEqual(h["biaya"], 6500)
+        self.assertEqual(h["diterima"], 43500)
+        self.assertTrue(h["kena_lantai"])
+
+    def test_persen_menang_di_nominal_besar(self):
+        h = knowledge.hitung_biaya_penarikan(200000)
+        self.assertEqual(h["biaya"], 10000)
+        self.assertEqual(h["diterima"], 190000)
+        self.assertFalse(h["kena_lantai"])
+
+    def test_titik_balik(self):
+        self.assertEqual(knowledge.WITHDRAWAL_FEE_BREAKEVEN, 130000)
+        self.assertEqual(knowledge.hitung_biaya_penarikan(130000)["biaya"], 6500)
+        self.assertEqual(knowledge.hitung_biaya_penarikan(130020)["biaya"], 6501)
+
+    def test_penarikan_pertama_bebas_biaya(self):
+        h = knowledge.hitung_biaya_penarikan(50000, penarikan_pertama=True)
+        self.assertEqual(h["biaya"], 0)
+        self.assertEqual(h["diterima"], 50000)
+
+    def test_pembebasan_pertama_ada_plafonnya(self):
+        """WD pertama terbesar sepanjang sejarah produksi: Rp 3,5 jt."""
+        h = knowledge.hitung_biaya_penarikan(3500000, penarikan_pertama=True)
+        self.assertEqual(h["biaya_sebelum_pembebasan"], 175000)
+        self.assertEqual(h["dibebaskan"], knowledge.FIRST_WITHDRAWAL_WAIVER_CAP)
+        self.assertEqual(h["biaya"], 125000)
+
+    def test_nominal_kacau_tidak_melempar(self):
+        self.assertEqual(knowledge.hitung_biaya_penarikan(None)["nominal"], 0)
+        self.assertEqual(knowledge.hitung_biaya_penarikan("banyak")["nominal"], 0)
+
+    def test_fakta_kb_menulis_lantainya_sebagai_aturan_bukan_catatan(self):
+        fakta = next(f for f in knowledge.FACTS if f["id"] == "creator.withdraw")
+        self.assertIn("LEBIH BESAR", fakta["text"])
+        self.assertIn("Rp 43.500", fakta["text"])
+
+    def test_alat_hitung_ada_untuk_kreator_saja(self):
+        kreator = {s["function"]["name"] for s in tools.specs_for("creator")}
+        brand = {s["function"]["name"] for s in tools.specs_for("brand")}
+        self.assertIn("hitung_penarikan", kreator)
+        self.assertNotIn("hitung_penarikan", brand)
+
+    def test_prompt_menyuruh_pakai_alat_bukan_menghitung(self):
+        teks = prompts.build_system_prompt(
+            {"role": "creator", "profileFound": True}, has_tools=True
+        )
+        self.assertIn("hitung_penarikan", teks)
+
+
+class TestPromosiBerbayar(unittest.TestCase):
+    """22 Agu 2026 seorang kreator nanya "aman nggak pakai TikTok promosi" dan
+    dijawab "aman selama ikut aturan platform". Aturannya memang nggak ada di
+    KB waktu itu, dan lubang di KB nggak bikin model diam, dia mengarang."""
+
+    def test_fakta_ada_dan_sampai_ke_kreator(self):
+        ids = {f["id"] for f in knowledge.facts_for("creator")}
+        self.assertIn("creator.paid_promo", ids)
+
+    def test_isinya_menolak_bukan_mengizinkan(self):
+        fakta = next(f for f in knowledge.FACTS if f["id"] == "creator.paid_promo")
+        teks = fakta["text"].lower()
+        self.assertIn("nggak boleh", teks)
+        self.assertIn("promote", teks)
+
+    def test_masuk_ke_prompt_kreator(self):
+        teks = prompts.build_system_prompt(
+            {"role": "creator", "profileFound": True}, has_tools=True
+        )
+        self.assertIn("creator.paid_promo", teks)
+
+
+class TestCakupanKB(unittest.TestCase):
+    """Penyisiran 22 Agu 2026: aturan yang sudah lama ada di kode aplikasi tapi
+    nggak pernah masuk KB, jadi AI menjawabnya dengan tebakan.
+
+    Uji ini menjaga yang paling mahal kalau hilang: pembulatan bayaran, uang
+    penarikan yang kembali, dan syarat sampel. Tiga-tiganya pernah jadi
+    pertanyaan berulang di support.
+    """
+
+    def _fakta(self, fid):
+        return next(f for f in knowledge.FACTS if f["id"] == fid)
+
+    def test_pembulatan_seribu_views_ada_dan_tegas(self):
+        teks = self._fakta("creator.payout_rounding")["text"]
+        self.assertIn("DIBULATKAN KE BAWAH", teks)
+        self.assertIn("1.900", teks)
+
+    def test_penarikan_ditolak_menjelaskan_uangnya_balik(self):
+        teks = self._fakta("creator.withdraw_rejected")["text"].lower()
+        self.assertIn("dikembalikan", teks)
+        self.assertIn("bukan hilang", teks)
+
+    def test_syarat_sampel_menyebut_profil_dan_alamat(self):
+        teks = self._fakta("creator.sample_eligibility")["text"].lower()
+        for kata in ("profil", "alamat", "satu kampanye"):
+            self.assertIn(kata, teks)
+
+    def test_angka_di_teks_ikut_konstanta(self):
+        """Angka yang diketik tangan di teks bakal basi diam-diam waktu
+        konstantanya berubah. Ini memastikan teksnya dirakit dari konstanta."""
+        self.assertIn(str(knowledge.PROOF_VIDEO_MAX_MB), self._fakta("creator.proof_upload")["text"])
+        teks_akun = self._fakta("all.profile_rules")["text"]
+        self.assertIn(str(knowledge.HANDLE_MAX_LEN), teks_akun)
+        self.assertIn(str(knowledge.PASSWORD_MIN_LEN), teks_akun)
+
+    def test_shopeepay_ikut_didaftar(self):
+        self.assertIn("ShopeePay", knowledge.SUPPORTED_EWALLETS)
+        self.assertIn("ShopeePay", self._fakta("creator.withdraw")["text"])
+
+    def test_fakta_brand_baru_tidak_bocor_ke_kreator(self):
+        kreator = {f["id"] for f in knowledge.facts_for("creator")}
+        self.assertNotIn("brand.campaign_states", kreator)
+        self.assertNotIn("brand.perpost_quota", kreator)
+
+    def test_fakta_kreator_baru_sampai_ke_kreator(self):
+        kreator = {f["id"] for f in knowledge.facts_for("creator")}
+        for fid in (
+            "creator.payout_rounding",
+            "creator.campaign_closed",
+            "creator.sample_eligibility",
+            "creator.withdraw_rejected",
+            "creator.no_topup",
+            "creator.tools",
+            "creator.wepost_rules",
+            "creator.auto_approve_trust",
+            "creator.perpost_paid_lock",
+            "creator.proof_upload",
+            "creator.dm",
+            "all.profile_rules",
+        ):
+            self.assertIn(fid, kreator)
+
+    def test_prompt_kreator_belum_kebablasan(self):
+        """KB boleh tumbuh, tapi jangan diam-diam. Batas ini bukan batas teknis
+        model, cuma alarm supaya penambahan berikutnya dipikir dulu."""
+        teks = prompts.build_system_prompt(
+            {"role": "creator", "profileFound": True}, has_tools=True
+        )
+        self.assertLess(len(teks), 26000, "prompt kreator makin gemuk, tinjau lagi isinya")
+
+
 class TestPrompt(unittest.TestCase):
     def test_memuat_aturan_keamanan_dan_data(self):
         teks = prompts.build_system_prompt(

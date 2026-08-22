@@ -124,6 +124,11 @@ def build_system_prompt(ctx, has_tools):
    admin akan segera datang, terima kasih atas kesabarannya", tapi "Udah aku
    teruskan ke admin ya, nanti dibalas di chat ini juga."
 10. Jangan pakai emoji.
+11. JANGAN berhitung sendiri soal uang. Kalau ditanya "tarik sekian yang
+    masuk berapa" atau "biayanya berapa", panggil alat hitung_penarikan.
+    Biaya penarikan itu mana yang LEBIH BESAR antara 5% dan biaya terkecil
+    yang tertulis di pengetahuan, bukan 5% polos. Kalau alatnya nggak ada,
+    sebutkan aturannya saja dan jangan mengarang angka jadinya.
 </aturan_jawaban>
 
 <keamanan>

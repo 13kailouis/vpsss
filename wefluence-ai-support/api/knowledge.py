@@ -45,6 +45,9 @@ NEW_CREATOR_GRACE_DAYS = 30
 WITHDRAWAL_FEE_RATE = 0.05
 WITHDRAWAL_FEE_FLOOR = 6500
 FIRST_WITHDRAWAL_WAIVER_CAP = 50000
+# Nominal tempat 5% baru menyamai lantai Rp 6.500. Di bawah ini yang berlaku
+# SELALU lantainya, dan itu mayoritas penarikan di produksi.
+WITHDRAWAL_FEE_BREAKEVEN = int(WITHDRAWAL_FEE_FLOOR / WITHDRAWAL_FEE_RATE)
 
 MIN_CAMPAIGN_BUDGET = 1500000
 MIN_PAYOUT_PER_1000 = 1000
@@ -52,6 +55,20 @@ MIN_PAYOUT_PER_1000_UGC = 5000
 CAMPAIGN_TOPUP_FEE_RATE = 0.10
 
 MIN_FIRST_CLAIM_VIEWS = 500
+# Bayaran dihitung per kelipatan ini, dibulatkan KE BAWAH.
+# Sumber: src/services/payment.js (Math.floor(views / 1000) * ratePer1000).
+VIEWS_PER_PAYOUT_UNIT = 1000
+# Kampanye berhenti menerima konten baru waktu sisa jatah kreator tinggal
+# segini. Sumber: AMBANG_SISA_BUDGET di src/utils/campaignEligibility.js.
+CAMPAIGN_CLOSED_BUDGET_SHARE = 0.05
+# Batas unggah video bukti analitik dan banding, dalam MB.
+# Sumber: MAX_VIDEO_SIZE_BYTES di src/screens/ClaimBandingScreen.js.
+PROOF_VIDEO_MAX_MB = 200
+# Panjang username profil publik. Sumber: functions/src/handles.js.
+HANDLE_MIN_LEN = 3
+HANDLE_MAX_LEN = 30
+# Panjang password minimum waktu daftar. Sumber: src/screens/RegisterScreen.js.
+PASSWORD_MIN_LEN = 6
 # Batas "konten nggak ditinjau brand". Lewat ini, admin boleh menolak massal
 # supaya budget kampanye nggak nyangkut. Sumber: STALE_DAYS di
 # src/screens/StaleContentReviewScreen.js.
@@ -76,7 +93,7 @@ FEE_LADDER = [
 ]
 
 SUPPORTED_BANKS = ["BCA", "BNI", "BRI", "Mandiri", "Permata"]
-SUPPORTED_EWALLETS = ["GoPay", "DANA", "OVO"]
+SUPPORTED_EWALLETS = ["GoPay", "DANA", "OVO", "ShopeePay"]
 SUPPORTED_PLATFORMS = ["TikTok", "Instagram Reels", "YouTube Shorts"]
 
 
@@ -104,6 +121,37 @@ def ladder_rate_for(lifetime_spend):
         if total <= upper:
             return rate
     return FEE_LADDER[-1][1]
+
+
+def hitung_biaya_penarikan(nominal, penarikan_pertama=False):
+    """Biaya dan uang yang benar-benar masuk rekening. Cermin persis
+    functions/src/payment.js.
+
+    Ini ada karena modelnya BISA berhitung, dan justru itu masalahnya. Di
+    produksi 22 Agu 2026 dia menjawab "tarik Rp 50.000, biaya 5% = Rp 2.500,
+    masuk Rp 47.500" padahal lantainya Rp 6.500 (yang benar: biaya Rp 6.500,
+    masuk Rp 43.500). Kalimat KB-nya sendiri sudah benar; yang salah cuma
+    aritmatikanya, dan aritmatika salah begitu tetap terdengar meyakinkan.
+    Jadi hitungannya dipindah ke kode, bukan dititipkan ke model.
+    """
+    import math
+
+    try:
+        n = int(round(float(nominal)))
+    except (TypeError, ValueError):
+        n = 0
+    n = max(0, n)
+    kotor = max(math.ceil(n * WITHDRAWAL_FEE_RATE), WITHDRAWAL_FEE_FLOOR)
+    dibebaskan = min(kotor, FIRST_WITHDRAWAL_WAIVER_CAP) if penarikan_pertama else 0
+    biaya = kotor - dibebaskan
+    return {
+        "nominal": n,
+        "biaya": biaya,
+        "biaya_sebelum_pembebasan": kotor,
+        "dibebaskan": dibebaskan,
+        "diterima": n - biaya,
+        "kena_lantai": n < WITHDRAWAL_FEE_BREAKEVEN,
+    }
 
 
 def _ladder_text():
@@ -203,6 +251,19 @@ FACTS = [
         ),
     ),
     dict(
+        id="all.profile_rules",
+        roles="all",
+        topic="akun",
+        source="functions/src/handles.js",
+        text=(
+            "Aturan isian akun: password minimal " + str(PASSWORD_MIN_LEN) + " "
+            "karakter. Username profil publik " + str(HANDLE_MIN_LEN) + " sampai "
+            + str(HANDLE_MAX_LEN) + " karakter dan cuma boleh huruf kecil, angka, "
+            "titik, sama garis bawah. Profil kreator wajib mengisi minimal satu "
+            "akun media sosial yang aktif, cukup usernamenya saja tanpa link."
+        ),
+    ),
+    dict(
         id="all.contact_admin",
         roles="all",
         topic="dasar",
@@ -279,6 +340,33 @@ FACTS = [
         ),
     ),
     dict(
+        id="creator.payout_rounding",
+        roles="creator",
+        topic="klaim",
+        source="src/services/payment.js",
+        text=(
+            "Bayaran dihitung per kelipatan " + rupiah(VIEWS_PER_PAYOUT_UNIT)[3:]
+            + " views dan DIBULATKAN KE BAWAH. Jadi 1.900 views dibayar seperti "
+            "1.000 views, sisa 900-nya nggak hilang tapi baru ikut dibayar kalau "
+            "nanti tembus 2.000. Tiap klaim juga cuma membayar selisih ribuan yang "
+            "belum pernah dibayar, bukan menghitung ulang dari nol. Ini alasan "
+            "paling sering kenapa uang yang masuk terasa lebih kecil dari hitungan "
+            "sendiri."
+        ),
+    ),
+    dict(
+        id="creator.proof_upload",
+        roles="creator",
+        topic="klaim",
+        source="src/screens/ClaimBandingScreen.js",
+        text=(
+            "Video bukti analitik dan video banding maksimal "
+            + str(PROOF_VIDEO_MAX_MB) + " MB, formatnya MP4 atau WebM. Kalau "
+            "uploadnya ditolak, biasanya ukurannya lewat, jadi potong durasinya "
+            "atau rekam ulang lebih pendek."
+        ),
+    ),
+    dict(
         id="creator.budget_out",
         roles="creator",
         topic="klaim",
@@ -326,6 +414,49 @@ FACTS = [
             "bisa mengirim konten. Ini beda dari blokir permanen: yang permanen "
             "itu buat kecurangan views. Cara menghindarinya cuma satu, baca "
             "alasan penolakan sebelum kirim lagi."
+        ),
+    ),
+    dict(
+        id="creator.campaign_closed",
+        roles="creator",
+        topic="alur",
+        source="src/utils/campaignEligibility.js",
+        text=(
+            "Kampanye berhenti menerima konten baru kalau salah satu ini kejadian: "
+            "lewat tenggat, statusnya sudah ditutup atau dibatalkan, atau sisa "
+            "budgetnya tinggal 5 persen ke bawah. Tenggat dihitung sampai tengah "
+            "malam hari itu, jadi kampanye yang tenggatnya hari ini masih boleh "
+            "dikirimi konten sampai jam 23.59. Yang penting: berhenti menerima "
+            "konten BUKAN berarti berhenti membayar. Konten yang sudah disetujui "
+            "tetap bisa diklaim sampai budgetnya benar-benar nol."
+        ),
+    ),
+    dict(
+        id="creator.sample_eligibility",
+        roles="creator",
+        topic="alur",
+        source="src/screens/CampaignDetailScreen.js",
+        text=(
+            "Tombol minta sampel cuma muncul kalau semuanya terpenuhi: profil kamu "
+            "lengkap (nama, foto, bio, lokasi, dan minimal satu akun sosmed), kamu "
+            "sudah pernah menyelesaikan minimal satu kampanye, alamat pengiriman "
+            "sudah diisi, kamu belum pernah mengajukan sampel di kampanye itu, dan "
+            "kalau kampanyenya pakai seleksi manual, lamaranmu harus sudah "
+            "diterima dulu. Jadi kalau tombolnya nggak ada, cek profil dan alamat "
+            "dulu, bukan kampanyenya yang rusak."
+        ),
+    ),
+    dict(
+        id="creator.dm",
+        roles="creator",
+        topic="alur",
+        source="src/screens/DirectChatScreen.js",
+        text=(
+            "Obrolan langsung dengan brand dimulai dari sisi brand. Kalau brand "
+            "belum pernah mengirim pesan, ruang chatnya memang belum ada dan kamu "
+            "nggak bisa membukanya duluan. Pesan yang sudah masuk ada di menu "
+            "Pesan. Kalau butuh bantuan yang nggak bisa nunggu brand, lewat menu "
+            "Bantuan saja."
         ),
     ),
     dict(
@@ -491,6 +622,18 @@ FACTS = [
         ),
     ),
     dict(
+        id="creator.auto_approve_trust",
+        roles="creator",
+        topic="konten",
+        source="functions/src/moderationAutomation.js",
+        text=(
+            "Sebagian kreator kontennya lolos tahap admin otomatis dan langsung "
+            "masuk ke brand: yang langganan PRO aktif, dan yang diberi status "
+            "terpercaya oleh admin. Notifikasinya bilang kontenmu diteruskan tanpa "
+            "antre. Yang dilewati cuma antrean admin, brand tetap yang memutuskan."
+        ),
+    ),
+    dict(
         id="creator.rejection_reasons",
         roles="creator",
         topic="konten",
@@ -511,6 +654,17 @@ FACTS = [
             "Satu video cuma boleh dipakai di satu kampanye. Kalau link yang sama "
             "dikirim lagi ke kampanye lain, sistem menolaknya otomatis. Ini bukan "
             "hukuman, cuma penjaga supaya satu video nggak dibayar dua kali."
+        ),
+    ),
+    dict(
+        id="creator.perpost_paid_lock",
+        roles="creator",
+        topic="konten",
+        source="src/screens/PublicProfileScreen.js",
+        text=(
+            "Konten di kampanye bayar per video yang sudah dibayar nggak bisa "
+            "dihapus dari portofolio. Itu bukti pekerjaan yang sudah dibayar, jadi "
+            "kalau ada masalah dengan post itu, hubungi admin."
         ),
     ),
     dict(
@@ -580,8 +734,14 @@ FACTS = [
         text=(
             "Tarik saldo minimal " + rupiah(MIN_WITHDRAWAL) + ". Kreator baru, yaitu "
             "dalam " + str(NEW_CREATOR_GRACE_DAYS) + " hari sejak daftar, boleh mulai "
-            "dari " + rupiah(MIN_WITHDRAWAL_NEW_CREATOR) + ". Biayanya 5% dari nominal "
-            "dengan biaya terkecil " + rupiah(WITHDRAWAL_FEE_FLOOR) + ". Penarikan "
+            "dari " + rupiah(MIN_WITHDRAWAL_NEW_CREATOR) + ". Biayanya diambil yang "
+            "LEBIH BESAR antara 5% nominal dan " + rupiah(WITHDRAWAL_FEE_FLOOR) + ", "
+            "bukan 5% saja. Di bawah " + rupiah(WITHDRAWAL_FEE_BREAKEVEN) + " yang "
+            "berlaku selalu " + rupiah(WITHDRAWAL_FEE_FLOOR) + ". Contoh: tarik "
+            + rupiah(50000) + " biayanya " + rupiah(WITHDRAWAL_FEE_FLOOR) + " dan yang "
+            "masuk " + rupiah(50000 - WITHDRAWAL_FEE_FLOOR) + "; tarik "
+            + rupiah(200000) + " biayanya " + rupiah(10000) + " dan yang masuk "
+            + rupiah(190000) + ". Penarikan "
             "PERTAMA seumur hidup bebas biaya. Prosesnya 1 sampai 3 hari kerja. "
             "Tujuannya bank (" + ", ".join(SUPPORTED_BANKS) + ") atau e-wallet ("
             + ", ".join(SUPPORTED_EWALLETS) + ")."
@@ -596,6 +756,31 @@ FACTS = [
             "Nama pemilik rekening harus sama dengan nama akun Wefluence kamu. Kalau "
             "beda, penarikannya ditahan buat diperiksa. Rekening diatur di menu "
             "Rekening bank."
+        ),
+    ),
+    dict(
+        id="creator.withdraw_rejected",
+        roles="creator",
+        topic="uang",
+        source="src/services/payment.js",
+        text=(
+            "Kalau penarikan ditolak atau gagal diproses, uangnya DIKEMBALIKAN "
+            "penuh ke saldo, bukan hilang, dan biayanya juga nggak jadi dipotong. "
+            "Notifikasinya berjudul Penarikan Belum Bisa Diproses, alasannya "
+            "dibuka di detail notifikasi itu. Penyebab paling sering: nama pemilik "
+            "rekening beda dengan nama akun, atau nomor rekeningnya salah. "
+            "Perbaiki rekeningnya dulu, baru ajukan lagi."
+        ),
+    ),
+    dict(
+        id="creator.no_topup",
+        roles="creator",
+        topic="uang",
+        source="src/screens/WalletScreen.js",
+        text=(
+            "Kreator nggak punya menu isi saldo. Top up itu cuma buat akun brand. "
+            "Saldo kreator datang dari klaim views yang disetujui, jadi nggak ada "
+            "yang perlu kamu setor duluan."
         ),
     ),
     dict(
@@ -624,6 +809,29 @@ FACTS = [
         ),
     ),
     dict(
+        id="creator.paid_promo",
+        roles="creator",
+        topic="aturan",
+        # Belum ada di kode mana pun. Ini keputusan produk 22 Agu 2026, diambil
+        # setelah AI menjawab "aman" ke kreator yang nanya boleh nggak pakai
+        # promosi TikTok. Sebelum ini KB-nya sengaja diam karena aturannya
+        # memang belum pernah ditulis, dan diamnya KB dijawab model dengan
+        # tebakan yang terdengar meyakinkan. Kalau aturan ini nanti ditulis di
+        # layar aplikasi atau syarat kampanye, ganti source ke berkas itu.
+        source="keputusan produk 22 Agu 2026 (belum tertulis di aplikasi)",
+        text=(
+            "Views yang kamu klaim harus organik. Iklan berbayar bawaan platform, "
+            "misalnya TikTok Promote atau Boost, Instagram dan Facebook Ads, atau "
+            "jasa promosi berbayar apa pun, NGGAK BOLEH dipakai di konten yang kamu "
+            "klaim di Wefluence, karena yang dibayar brand itu jangkauan asli bukan "
+            "jangkauan yang dibeli. Kalau konten yang diklaim ternyata dipromosikan "
+            "berbayar, klaimnya ditolak dan viewsnya nggak dibayar. Ini beda dari "
+            "beli views atau bot yang hukumannya blokir permanen, tapi tetap nggak "
+            "boleh. Boleh promosi gratis sebanyak-banyaknya: bagikan sendiri ke "
+            "grup, story, atau akun lain milikmu."
+        ),
+    ),
+    dict(
         id="creator.wepost",
         roles="creator",
         topic="alat",
@@ -632,6 +840,33 @@ FACTS = [
             "Di menu Alat kreasi ada penjadwal posting: sambungkan akun TikTok, lalu "
             "video bisa dijadwalkan tayang otomatis. Instagram belum aktif, masih "
             "menunggu izin dari Meta."
+        ),
+    ),
+    dict(
+        id="creator.tools",
+        roles="creator",
+        topic="alat",
+        source="src/screens/CreatorToolsScreen.js",
+        text=(
+            "Menu Alat kreasi isinya empat: Wepost buat menjadwalkan posting, Bank "
+            "hook buat contoh kalimat pembuka, Inspirasi konten buat melihat konten "
+            "yang performanya bagus, dan Kalkulator cuan buat memperkirakan "
+            "penghasilan dari jumlah views. Weclip yang muncul di banner masih "
+            "segera hadir, belum bisa dipakai."
+        ),
+    ),
+    dict(
+        id="creator.wepost_rules",
+        roles="creator",
+        topic="alat",
+        source="src/screens/SchedulePostScreen.js",
+        text=(
+            "Aturan Wepost: TikTok baru mendukung unggahan video, belum foto. "
+            "Konten bertanda branded content nggak boleh disetel privat. Kalau "
+            "muncul sesi kedaluwarsa, akun TikTok-nya tinggal dihubungkan ulang di "
+            "Wepost. TikTok sendiri juga bisa menolak unggahannya, biasanya karena "
+            "videonya dianggap tidak original, akunnya masih privat, atau kena "
+            "batas unggah harian."
         ),
     ),
     dict(
@@ -766,6 +1001,31 @@ FACTS = [
         text=(
             "Budget kampanye ditahan di escrow. Uangnya baru pindah ke kreator waktu "
             "klaim viewsnya disetujui."
+        ),
+    ),
+    dict(
+        id="brand.campaign_states",
+        roles="brand",
+        topic="alur",
+        source="src/screens/BrandCampaignsScreen.js",
+        text=(
+            "Kampanye yang belum dibayar belum tayang dan belum kelihatan oleh "
+            "kreator. Sesudah dibayar, kampanyenya diperiksa tim Wefluence dulu "
+            "sebelum boleh tayang. Kampanye yang dijeda tetap ada tapi kreator "
+            "nggak bisa mengirim konten baru selama dijeda. Kampanye yang "
+            "dibatalkan nggak bisa dijalankan lagi dan sisa dananya dikembalikan."
+        ),
+    ),
+    dict(
+        id="brand.perpost_quota",
+        roles="brand",
+        topic="budget",
+        source="src/screens/CampaignTopUpScreen.js",
+        text=(
+            "Kampanye bayar per video budgetnya terkunci sesuai kuota, yaitu harga "
+            "per video dikali jumlah video. Jadi kampanye jenis ini nggak bisa "
+            "ditambah dana lewat tombol tambah dana biasa. Kalau mau menambah "
+            "kuota videonya, hubungi tim Wefluence."
         ),
     ),
     dict(

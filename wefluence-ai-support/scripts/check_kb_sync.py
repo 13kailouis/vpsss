@@ -156,6 +156,44 @@ check(
 )
 
 
+check(
+    "kelipatan views yang dibayar",
+    "src/services/payment.js",
+    r"Math\.floor\(parsedViews / (\d+)\)",
+    knowledge.VIEWS_PER_PAYOUT_UNIT,
+)
+check(
+    "ambang sisa budget kampanye ditutup",
+    "src/utils/campaignEligibility.js",
+    r"AMBANG_SISA_BUDGET\s*=\s*([\d.]+)",
+    knowledge.CAMPAIGN_CLOSED_BUDGET_SHARE,
+)
+check(
+    "batas ukuran video bukti (MB)",
+    "src/screens/ClaimBandingScreen.js",
+    r"MAX_VIDEO_SIZE_BYTES\s*=\s*(\d+)\s*\*\s*1024",
+    knowledge.PROOF_VIDEO_MAX_MB,
+)
+check(
+    "panjang minimum username",
+    "functions/src/handles.js",
+    r"h\.length < (\d+)",
+    knowledge.HANDLE_MIN_LEN,
+)
+check(
+    "panjang maksimum username",
+    "functions/src/handles.js",
+    r"h\.length > (\d+)",
+    knowledge.HANDLE_MAX_LEN,
+)
+check(
+    "panjang minimum password",
+    "src/screens/RegisterScreen.js",
+    r"password\.length < (\d+)",
+    knowledge.PASSWORD_MIN_LEN,
+)
+
+
 def check_ladder(repo, problems, skipped):
     source = read(repo, "src/utils/platformFee.js")
     if source is None:
