@@ -173,6 +173,36 @@ def _parse_media_nodes(html):
     return out
 
 
+IG_GRID_COOLDOWN = int(os.environ.get('IG_GRID_COOLDOWN', '600'))  # detik
+_GRID_COOLDOWN_UNTIL = 0.0
+
+
+def _grid_note_429(retry_after=None):
+    """Catat penolakan 429 dan istirahatkan panggilan grid."""
+    global _GRID_COOLDOWN_UNTIL
+    wait = IG_GRID_COOLDOWN
+    if retry_after:
+        try:
+            wait = max(wait, int(retry_after))
+        except (TypeError, ValueError):
+            pass
+    with _GRID_LOCK:
+        _GRID_COOLDOWN_UNTIL = time.time() + wait
+    print(f'[ig_public] grid kena 429, istirahat {wait} detik')
+
+
+def _grid_in_cooldown():
+    with _GRID_LOCK:
+        return _GRID_COOLDOWN_UNTIL > time.time()
+
+
+def grid_status():
+    """Untuk ditempel di endpoint kesehatan: sisa waktu istirahat grid."""
+    with _GRID_LOCK:
+        sisa = max(0, int(_GRID_COOLDOWN_UNTIL - time.time()))
+    return {'grid_cooldown_seconds': sisa, 'grid_proxy': bool(IG_GRID_PROXY)}
+
+
 def fetch_reels_grid(username, use_cache=True):
     """12 reel terbaru milik `username`, dengan angka eksak. {} kalau tidak ada."""
     if not username:
@@ -184,12 +214,22 @@ def fetch_reels_grid(username, use_cache=True):
             if hit and hit[0] > now:
                 return hit[1]
 
+    # Sedang dihukum 429: jangan menembak sama sekali. Retry saat sedang kena
+    # limit justru memperpanjang hukumannya, dan hasilnya tetap nol.
+    if _grid_in_cooldown():
+        with _GRID_LOCK:
+            _GRID_CACHE[username] = (now + IG_GRID_TTL, {})
+        return {}
+
     result = {}
     for attempt in range(IG_GRID_RETRY):
         try:
             r = requests.get(f'https://www.instagram.com/{username}/reels/',
                              headers=NAV_HEADERS, proxies=_GRID_PROXIES,
                              timeout=IG_PUBLIC_TIMEOUT)
+            if r.status_code == 429:
+                _grid_note_429(r.headers.get('Retry-After'))
+                break  # bukan kasus "kosong sesaat", ini penolakan tegas
             if r.status_code == 200:
                 for node in _parse_media_nodes(r.text):
                     if node['play_count'] is not None:
