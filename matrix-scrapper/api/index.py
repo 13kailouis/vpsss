@@ -225,6 +225,20 @@ def _parse_pool(raw):
 
 IG_SESSION_POOL = _parse_pool(os.environ.get('IG_SESSIONID', '') or os.environ.get('IG_SESSIONIDS', ''))
 IG_PROXY = (os.environ.get('IG_PROXY', '') or os.environ.get('SCRAPER_PROXY', '')).strip()
+# Jalur publik tanpa cookie. Mode:
+#   fallback (bawaan) - dipakai kalau kolam sessionid kosong / jalur lama gagal
+#   first             - dicoba duluan, sessionid cuma cadangan
+#   only              - sessionid tidak dipakai sama sekali
+#   off               - matikan
+IG_PUBLIC_MODE = (os.environ.get('IG_PUBLIC_MODE', 'fallback') or 'fallback').strip().lower()
+try:
+    from . import ig_public as _ig_public
+except ImportError:
+    try:
+        import ig_public as _ig_public
+    except ImportError:
+        _ig_public = None
+
 IG_BASE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 # Throttle anti-bot: batasi jumlah request IG yang jalan BERSAMAAN + jeda acak.
@@ -412,6 +426,27 @@ def _get_instagram_graphql(shortcode, sessionid=None):
 
     return data
 
+def _ig_public_try(url):
+    """Jalur publik tanpa cookie (ig_public.py). None kalau tidak dapat apa-apa.
+
+    Field tambahan (views_exact/views_source/meta_views) sengaja dibuang di sini
+    supaya bentuk balasan API tidak berubah; asal angkanya tetap dicatat ke log.
+    """
+    if _ig_public is None:
+        return None
+    try:
+        res = _ig_public.get_instagram_public(url)
+    except Exception:
+        return None
+    if not res:
+        return None
+    print(f"[ig_public] {url} views={res.get('views')} "
+          f"source={res.get('views_source')} exact={res.get('views_exact')} "
+          f"meta_views={res.get('meta_views')}")
+    return {k: res[k] for k in
+            ('platform', 'uploader', 'title', 'views', 'likes', 'comments', 'shares')}
+
+
 def get_instagram_custom(url, interactive=False):
     data = {
         'platform': 'Instagram',
@@ -422,6 +457,17 @@ def get_instagram_custom(url, interactive=False):
         'comments': 0,
         'shares': 0
     }
+
+    # Jalur publik didahulukan hanya kalau diminta lewat env, atau kalau memang
+    # tidak ada sessionid sama sekali — dengan begitu perilaku produksi yang
+    # sekarang tidak berubah sampai kamu sendiri yang membalik urutannya.
+    if IG_PUBLIC_MODE == 'only' or (IG_PUBLIC_MODE == 'first' and _ig_public) \
+            or (IG_PUBLIC_MODE != 'off' and not IG_SESSION_POOL):
+        pub = _ig_public_try(url)
+        if pub:
+            return pub
+        if IG_PUBLIC_MODE == 'only':
+            return None
 
     # Throttle + rotasi akun: 1 sessionid acak per URL.
     # interactive=True (scan 1 URL dari user) → jalur cepat: tanpa semaphore & tanpa
@@ -498,6 +544,13 @@ def get_instagram_custom(url, interactive=False):
 
         except Exception:
             pass
+
+        # Method 3: jalur publik tanpa cookie — kesempatan terakhir sebelum
+        # URL ini dilaporkan gagal total.
+        if IG_PUBLIC_MODE != 'off':
+            pub = _ig_public_try(url)
+            if pub:
+                return pub
 
     return None
 
