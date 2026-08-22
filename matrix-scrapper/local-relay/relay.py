@@ -37,7 +37,24 @@ except ImportError:
     print('Tidak menemukan api/ig_public.py. Jalankan dari dalam repo vps.')
     raise
 
-RELAY_KEY = os.environ.get('RELAY_KEY', '').strip()
+def _read_key():
+    """Kunci dari env, atau dari berkas relay.key di sebelah skrip ini.
+
+    Berkasnya ada supaya relay bisa dinyalakan otomatis saat boot: penjadwal
+    tugas Windows tidak membawa variabel lingkungan sesi, dan menuliskan kunci
+    di dalam perintah penjadwal berarti kunci itu ikut terbaca di daftar tugas.
+    """
+    env_key = os.environ.get('RELAY_KEY', '').strip()
+    if env_key:
+        return env_key
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'relay.key')
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as f:
+            return f.read().strip()
+    return ''
+
+
+RELAY_KEY = _read_key()
 PORT = int(os.environ.get('PORT', '8787'))
 TIMEOUT = float(os.environ.get('TIMEOUT', '20'))
 
@@ -100,8 +117,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     if not RELAY_KEY:
-        print('RELAY_KEY belum diisi. Relay akan menolak semua request.')
-        print('Contoh: RELAY_KEY=rahasia python relay.py')
+        print('Kunci belum ada. Relay akan menolak semua request.')
+        print('Isi lewat env RELAY_KEY, atau simpan di berkas relay.key')
+        print('di folder ini (isinya kuncinya saja, satu baris).')
         sys.exit(1)
     print(f'Relay jalan di http://127.0.0.1:{PORT}')
     print('Uji cepat: curl -H "x-relay-key: ..." '

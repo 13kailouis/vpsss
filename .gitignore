@@ -8,3 +8,5 @@ nginx/certbot/
 *.log
 node_modules/
 .wrangler/
+matrix-scrapper/local-relay/relay.key
+matrix-scrapper/local-relay/config.yml

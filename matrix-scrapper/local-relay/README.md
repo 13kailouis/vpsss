@@ -77,6 +77,26 @@ docker compose exec matrix-scrapper python api/test_ig_public.py
 
 Bagian `[A] grid reels` harus keluar 12 reel dengan play_count.
 
+## Nyala sendiri setelah restart
+
+Relay dan tunnel yang dijalankan manual akan mati begitu mesin dimatikan. Untuk
+memasang keduanya sekali dan selesai:
+
+1. Simpan kuncinya di berkas `relay.key` di folder ini, isinya kunci saja satu
+   baris. Relay membaca berkas itu kalau env `RELAY_KEY` kosong. Berkas ini
+   tidak masuk git.
+2. Salin `config.example.yml` jadi `config.yml`, isi id tunnel dan lokasi
+   kredensial yang dicetak `cloudflared tunnel create`.
+3. Buka PowerShell **Run as Administrator**, lalu dari folder ini:
+
+```powershell
+.\install-autostart.ps1
+```
+
+Skrip itu memasang relay sebagai tugas terjadwal saat mesin menyala (tanpa
+jendela, otomatis dijalankan ulang kalau mati) dan cloudflared sebagai Windows
+service. Cara mencabutnya dicetak di akhir skrip.
+
 ## Yang perlu diterima apa adanya
 
 Mesin ini mati atau tidur berarti relay mati. Kalau `IG_PUBLIC_MODE` masih

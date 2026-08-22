@@ -1,0 +1,14 @@
+# Salin jadi config.yml lalu isi dengan punyamu sendiri.
+# config.yml asli tidak masuk git karena menunjuk ke berkas kredensial tunnel.
+#
+# ID tunnel dan lokasi kredensial dicetak oleh `cloudflared tunnel create`.
+
+tunnel: ID_TUNNEL_KAMU
+credentials-file: C:\Users\NAMA_PENGGUNA\.cloudflared\ID_TUNNEL_KAMU.json
+
+ingress:
+  - hostname: ig-relay.wefluence.app
+    service: http://127.0.0.1:8787
+  # Aturan terakhir wajib ada dan wajib tanpa hostname: itu yang menangkap
+  # permintaan ke hostname lain. Tanpa ini cloudflared menolak config-nya.
+  - service: http_status:404
