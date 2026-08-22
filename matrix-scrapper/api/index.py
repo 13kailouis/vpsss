@@ -442,7 +442,14 @@ def _ig_public_try(url):
         return None
     print(f"[ig_public] {url} views={res.get('views')} "
           f"source={res.get('views_source')} exact={res.get('views_exact')} "
-          f"meta_views={res.get('meta_views')}")
+          f"metric={res.get('views_metric')} meta_views={res.get('meta_views')}")
+
+    # Tanpa angka views, hasil ini tidak boleh dilaporkan sebagai scan berhasil.
+    # likes/comments-nya benar, tapi seluruh perhitungan bayaran bertumpu pada
+    # views; mengembalikan views=0 sebagai "sukses" akan tercatat sebagai reel
+    # nol tayangan, dan itu kekeliruan yang tidak terlihat oleh siapa pun.
+    if not res.get('views'):
+        return None
     return {k: res[k] for k in
             ('platform', 'uploader', 'title', 'views', 'likes', 'comments', 'shares')}
 

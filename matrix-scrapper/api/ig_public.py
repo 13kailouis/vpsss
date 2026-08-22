@@ -25,13 +25,18 @@ Tiga permukaan yang dipakai (hasil uji 22 Agu 2026):
      cadangan kalau reel-nya sudah tergeser keluar dari 12 terbaru di (A).
 
 PENTING soal dua angka views:
-    play_count (A)  != angka "views" di meta (C).  Contoh nyata:
+    play_count (A) != angka "views" di meta (C). Contoh nyata:
         DcUha0rTr43  play_count 9.438   vs meta "5,019 views"   (rasio ~1,88x)
         DcLFS3ivCcn  play_count 14.449  vs meta "7,474 views"   (rasio ~1,93x)
-    play_count = jumlah pemutaran (termasuk replay), sama dengan field
-    video_play_count yang dipakai jalur GraphQL lama. Jadi (A) adalah pengganti
-    setara untuk perhitungan payout yang sudah jalan; (C) angkanya beda kelas dan
-    JANGAN dicampur diam-diam.
+
+    Yang dilihat kreator adalah play_count. Dicek langsung di aplikasi pada 22
+    Agu 2026: reel DcUha0rTr43 tampil 9.734, sejalan dengan play_count yang saat
+    itu 9.438 lalu 9.561 dan terus naik, sementara angka meta mentok di ~5.100.
+    Jadi (A) setara dengan video_play_count yang dipakai jalur GraphQL lama dan
+    aman menggantikannya, sedangkan (C) TIDAK boleh dipakai sebagai views:
+    memakainya berarti membayar kreator sekitar setengah dari yang tampil di
+    layar mereka. (C) tetap diambil sebagai bahan pembanding di field meta_views,
+    tapi hanya mengisi 'views' kalau IG_META_VIEWS_AS_VIEWS dinyalakan sendiri.
 """
 
 import html as _html
@@ -82,6 +87,12 @@ IG_PUBLIC_PROXY = (os.environ.get('IG_PUBLIC_PROXY', '')
 # ini penting karena kuota proxy residensial dijual per-GB, dan grid cuma 1
 # request per creator (bukan per URL) sementara B dan C jalan per URL.
 IG_GRID_PROXY = (os.environ.get('IG_GRID_PROXY', '') or IG_PUBLIC_PROXY).strip()
+
+# Angka "views" dari meta BUKAN metrik yang dilihat kreator (lihat catatan di
+# get_instagram_public). Default mati: kalau grid tidak bisa diakses, lebih baik
+# views dilaporkan tidak diketahui daripada diisi angka yang meleset ~1,9x.
+IG_META_VIEWS_AS_VIEWS = os.environ.get(
+    'IG_META_VIEWS_AS_VIEWS', '0').strip().lower() in ('1', 'true', 'yes')
 
 # Grid kadang balas shell kosong walau dari IP sehat, biasanya sehabis burst.
 # Terukur: dengan jeda 3 detik, 20 dari 20 berisi; tanpa jeda sesudah burst,
@@ -392,7 +403,7 @@ def get_instagram_public(url, known_username=None, want_meta=False):
         'platform': 'Instagram', 'uploader': 'Unknown', 'title': 'Instagram Video',
         'views': 0, 'likes': 0, 'comments': 0, 'shares': 0,
         'views_exact': False, 'views_source': None, 'views_metric': None,
-        'meta_views': None,
+        'meta_views': None, 'meta_views_rounded': False,
     }
 
     username = known_username
@@ -429,10 +440,20 @@ def get_instagram_public(url, known_username=None, want_meta=False):
     # Meta hanya ditembak kalau memang perlu: kalau grid sudah memberi angka
     # eksak, request tambahan ini murni beban -- dan tiap request ke IG adalah
     # jatah yang lebih baik disimpan untuk URL yang belum punya angka.
-    if not data['views_exact'] or want_meta:
+    if not data['views_source'] or want_meta:
         mv, rounded = fetch_meta_views(shortcode)
         data['meta_views'] = mv
-        if not data['views_exact'] and mv:
+        data['meta_views_rounded'] = rounded
+        # SENGAJA tidak mengisi 'views'. Terbukti 22 Agu 2026 dengan mengecek
+        # langsung di aplikasi: reel DcUha0rTr43 tampil 9.734, sejalan dengan
+        # play_count (9.438 lalu 9.561 dan terus naik), bukan dengan angka meta
+        # yang mentok di ~5.100. Jadi angka meta BUKAN yang dilihat kreator, dan
+        # memakainya sebagai views berarti membayar sekitar setengah.
+        #
+        # Lebih baik pulang tanpa angka daripada pulang dengan angka yang salah
+        # tapi kelihatan benar: yang pertama kelihatan sebagai kegagalan dan
+        # diperiksa orang, yang kedua diam-diam masuk ke perhitungan bayaran.
+        if IG_META_VIEWS_AS_VIEWS and mv:
             data['views'] = mv
             data['views_source'] = 'meta'
             data['views_metric'] = 'ig_views'
