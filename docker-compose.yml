@@ -48,6 +48,27 @@ services:
       - IG_MAX_CONCURRENCY=${IG_MAX_CONCURRENCY:-2}
       - IG_MIN_DELAY=${IG_MIN_DELAY:-0.8}
       - IG_MAX_DELAY=${IG_MAX_DELAY:-2.5}
+      # Jalur publik tanpa cookie (api/ig_public.py).
+      #   IG_PUBLIC_MODE = fallback (bawaan, dipakai kalau jalur sessionid gagal)
+      #                    | first | only | off
+      #   IG_GRID_RELAY     = alamat relay untuk mengambil halaman profil, yang
+      #                       ditolak 429 dari IP datacenter mana pun (VPS
+      #                       maupun Cloudflare Worker sudah diuji dan ditolak).
+      #                       Isi dengan relay yang jalan di koneksi residensial,
+      #                       lihat matrix-scrapper/local-relay/.
+      #   IG_GRID_RELAY_KEY = kunci yang sama dengan RELAY_KEY di relay itu.
+      #   IG_GRID_PROXY     = alternatif berbayar: proxy residensial, khusus
+      #                       panggilan grid. Satu panggilan ~138 KB di kabel.
+      #   IG_GRID_TTL       = umur cache grid per-creator, detik (bawaan 120).
+      # IG_META_VIEWS_AS_VIEWS sengaja TIDAK diteruskan ke sini. Menyalakannya
+      # membuat angka meta dipakai sebagai views, dan angka itu sekitar setengah
+      # dari yang dilihat kreator. Kalau suatu saat benar-benar dibutuhkan,
+      # tambahkan sadar-sadar, jangan lewat .env yang tidak terbaca siapa pun.
+      - IG_PUBLIC_MODE=${IG_PUBLIC_MODE:-fallback}
+      - IG_GRID_RELAY=${IG_GRID_RELAY:-}
+      - IG_GRID_RELAY_KEY=${IG_GRID_RELAY_KEY:-}
+      - IG_GRID_PROXY=${IG_GRID_PROXY:-}
+      - IG_GRID_TTL=${IG_GRID_TTL:-120}
       # YouTube Data API v3 (resmi) — 50 video/panggilan, tanpa bot-check.
       # Isi di file .env: YT_API_KEY=AIza... (Google Cloud Console → enable
       # "YouTube Data API v3" → Credentials → API Key). Kosong = fallback scraping.
