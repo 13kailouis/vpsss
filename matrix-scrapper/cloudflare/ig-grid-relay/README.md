@@ -10,12 +10,21 @@ diketahui sebelum keluar biaya.
 
 ## Pasang
 
+Tidak perlu membuat Worker lewat dashboard. `wrangler deploy` yang membuatnya,
+namanya diambil dari `wrangler.toml`.
+
 ```bash
 cd matrix-scrapper/cloudflare/ig-grid-relay
 npx wrangler login
-npx wrangler secret put RELAY_KEY     # tempel string acak panjang
 npx wrangler deploy
+npx wrangler secret put RELAY_KEY
 ```
+
+Urutannya sengaja deploy dulu baru secret. Kalau `secret put` dijalankan
+sebelum Worker-nya ada, wrangler berhenti dan bertanya apakah mau membuat
+Worker baru. Deploy pertama memang belum punya kunci, jadi semua request
+dijawab 403 sampai `secret put` selesai -- itu perilaku yang benar, bukan
+kegagalan. Mengisi secret langsung membuat versi baru, tidak perlu deploy ulang.
 
 Hasil deploy memberi alamat seperti
 `https://ig-grid-relay.<subdomain>.workers.dev`.
