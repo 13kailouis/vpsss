@@ -34,6 +34,7 @@ def ip():
 
 print('IP keluar :', ip())
 print('proxy     :', ig.IG_PUBLIC_PROXY or '(tidak ada)')
+print('relay grid:', ig.IG_GRID_RELAY or '(tidak ada)')
 print()
 
 print(f'[A] grid reels /{USER}/reels/')

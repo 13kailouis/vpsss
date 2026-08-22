@@ -1,0 +1,10 @@
+name = "ig-grid-relay"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+# RELAY_KEY tidak ditulis di sini. Simpan sebagai secret:
+#     npx wrangler secret put RELAY_KEY
+# Menaruhnya di [vars] berarti kuncinya ikut masuk ke git.
+
+[observability]
+enabled = true

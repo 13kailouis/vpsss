@@ -88,6 +88,13 @@ IG_PUBLIC_PROXY = (os.environ.get('IG_PUBLIC_PROXY', '')
 # request per creator (bukan per URL) sementara B dan C jalan per URL.
 IG_GRID_PROXY = (os.environ.get('IG_GRID_PROXY', '') or IG_PUBLIC_PROXY).strip()
 
+# Alternatif gratis untuk proxy: Cloudflare Worker yang menembakkan request grid
+# dari IP tepi Cloudflare. Lihat cloudflare/ig-grid-relay/. Kalau diisi, relay
+# dipakai lebih dulu; kalau relay gagal, jalur langsung tetap dicoba supaya
+# matinya relay tidak ikut mematikan yang sudah jalan (mis. dari IP residensial).
+IG_GRID_RELAY = os.environ.get('IG_GRID_RELAY', '').strip().rstrip('/')
+IG_GRID_RELAY_KEY = os.environ.get('IG_GRID_RELAY_KEY', '').strip()
+
 # Angka "views" dari meta BUKAN metrik yang dilihat kreator (lihat catatan di
 # get_instagram_public). Default mati: kalau grid tidak bisa diakses, lebih baik
 # views dilaporkan tidak diketahui daripada diisi angka yang meleset ~1,9x.
@@ -211,7 +218,35 @@ def grid_status():
     """Untuk ditempel di endpoint kesehatan: sisa waktu istirahat grid."""
     with _GRID_LOCK:
         sisa = max(0, int(_GRID_COOLDOWN_UNTIL - time.time()))
-    return {'grid_cooldown_seconds': sisa, 'grid_proxy': bool(IG_GRID_PROXY)}
+    return {'grid_cooldown_seconds': sisa, 'grid_proxy': bool(IG_GRID_PROXY),
+            'grid_relay': bool(IG_GRID_RELAY)}
+
+
+def _grid_request(username):
+    """Ambil HTML grid. Balikan (status, teks, lewat-mana).
+
+    Relay dicoba duluan kalau di-set, tapi kegagalannya tidak mematikan apa pun:
+    jalur langsung tetap dijalankan sesudahnya. Yang dihindari di sini adalah
+    relay yang mati diam-diam lalu tampak seperti Instagram menolak.
+    """
+    if IG_GRID_RELAY:
+        try:
+            r = requests.get(IG_GRID_RELAY, params={'username': username},
+                             headers={'x-relay-key': IG_GRID_RELAY_KEY},
+                             timeout=IG_PUBLIC_TIMEOUT)
+            ig_status = r.headers.get('x-ig-status')
+            if ig_status:
+                return int(ig_status), r.text, 'relay'
+            # Tanpa header itu, yang menjawab adalah relay-nya sendiri (kunci
+            # salah, username ditolak, worker error), bukan Instagram.
+            print(f'[ig_public] relay menolak: {r.status_code} {r.text[:120]}')
+        except Exception as e:
+            print(f'[ig_public] relay tidak terjangkau: {str(e)[:100]}')
+
+    r = requests.get(f'https://www.instagram.com/{username}/reels/',
+                     headers=NAV_HEADERS, proxies=_GRID_PROXIES,
+                     timeout=IG_PUBLIC_TIMEOUT)
+    return r.status_code, r.text, 'langsung'
 
 
 def fetch_reels_grid(username, use_cache=True):
@@ -235,16 +270,17 @@ def fetch_reels_grid(username, use_cache=True):
     result = {}
     for attempt in range(IG_GRID_RETRY):
         try:
-            r = requests.get(f'https://www.instagram.com/{username}/reels/',
-                             headers=NAV_HEADERS, proxies=_GRID_PROXIES,
-                             timeout=IG_PUBLIC_TIMEOUT)
-            if r.status_code == 429:
-                _grid_note_429(r.headers.get('Retry-After'))
+            status, text, via = _grid_request(username)
+            if status == 429:
+                _grid_note_429(None)
                 break  # bukan kasus "kosong sesaat", ini penolakan tegas
-            if r.status_code == 200:
-                for node in _parse_media_nodes(r.text):
+            if status == 200:
+                for node in _parse_media_nodes(text):
                     if node['play_count'] is not None:
                         result[node['code']] = node
+                if not result:
+                    print(f'[ig_public] grid {username} via {via}: 200 tapi tanpa '
+                          f'angka (len={len(text)})')
         except Exception:
             result = {}
         if result:
