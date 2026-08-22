@@ -4,16 +4,19 @@
 Ini pertanyaan yang tidak bisa dijawab dari laptop: jalur lama mati di VPS karena
 IP datacenter diblokir, jadi jalur baru pun wajib dibuktikan dari sana.
 
-Jalankan di VPS:
-    docker compose exec matrix-scrapper python /app/test_ig_public.py
-atau:
-    python3 test_ig_public.py [username] [shortcode ...]
+Skripnya sengaja ditaruh di dalam api/ karena Dockerfile hanya menyalin folder
+itu ke image; berkas di root matrix-scrapper/ tidak pernah ikut terbawa.
+
+Jalankan di VPS, dari folder yang ada docker-compose.yml-nya:
+    docker compose exec matrix-scrapper python api/test_ig_public.py
+atau langsung di host:
+    python3 api/test_ig_public.py [username] [shortcode ...]
 """
+import os
 import sys
 import time
 
-sys.path.insert(0, __file__.rsplit('/', 1)[0] + '/api')
-sys.path.insert(0, __file__.rsplit('\\', 1)[0] + '\\api')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import requests  # noqa: E402
 import ig_public as ig  # noqa: E402
