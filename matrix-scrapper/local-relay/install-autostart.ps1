@@ -49,8 +49,43 @@ Start-ScheduledTask -TaskName $taskName
 Write-Host '      terpasang dan dijalankan.'
 
 Write-Host '[2/2] Memasang cloudflared sebagai service...'
-& $cloudflared --config $config service install
+
+# Service berjalan sebagai SYSTEM, dan SYSTEM tidak melihat isi
+# C:\Users\<kamu>\.cloudflared. Menjalankan `service install` sambil menunjuk
+# config di folder pengguna menghasilkan service yang terpasang dan berjalan,
+# tapi PathName-nya kosong dari argumen sehingga tidak menyambungkan apa pun --
+# gejalanya Cloudflare membalas 530 padahal service statusnya Running.
+# Jadi config dan kredensial disalin dulu ke profil SYSTEM.
+$sysDir = 'C:\Windows\System32\config\systemprofile\.cloudflared'
+New-Item -ItemType Directory -Force -Path $sysDir | Out-Null
+
+$cfg = Get-Content $config -Raw
+$credLine = [regex]::Match($cfg, '(?m)^\s*credentials-file:\s*(.+?)\s*$')
+if (-not $credLine.Success) { throw "config.yml tidak punya baris credentials-file" }
+$credSrc = $credLine.Groups[1].Value.Trim()
+if (-not (Test-Path $credSrc)) { throw "Berkas kredensial tidak ketemu: $credSrc" }
+
+$credDst = Join-Path $sysDir (Split-Path $credSrc -Leaf)
+Copy-Item $credSrc $credDst -Force
+
+# Config yang disalin harus menunjuk ke kredensial yang ikut disalin, bukan ke
+# lokasi lama di folder pengguna yang tidak terjangkau SYSTEM.
+$cfgSys = $cfg -replace [regex]::Escape($credSrc), $credDst.Replace('\', '\\')
+Set-Content -Path (Join-Path $sysDir 'config.yml') -Value $cfgSys -Encoding utf8
+
+$svc = Get-Service Cloudflared -ErrorAction SilentlyContinue
+if ($svc) {
+    Write-Host '      service lama dicabut dulu...'
+    & $cloudflared service uninstall | Out-Null
+    Start-Sleep -Seconds 2
+}
+& $cloudflared service install
+Start-Sleep -Seconds 3
+Start-Service Cloudflared -ErrorAction SilentlyContinue
 Write-Host '      terpasang.'
+
+$path = (Get-CimInstance Win32_Service -Filter "Name='Cloudflared'").PathName
+Write-Host "      PathName: $path"
 
 Write-Host ''
 Write-Host 'Selesai. Uji:'
