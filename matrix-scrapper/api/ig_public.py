@@ -76,7 +76,21 @@ IG_PUBLIC_PROXY = (os.environ.get('IG_PUBLIC_PROXY', '')
                    or os.environ.get('IG_PROXY', '')
                    or os.environ.get('SCRAPER_PROXY', '')).strip()
 
+# Terukur 22 Agu 2026: dari IP datacenter, halaman post (B) dan meta views (C)
+# tetap dilayani, tapi rute PROFIL balik shell kosong 15 dari 15 percobaan.
+# Jadi hanya panggilan grid yang perlu keluar lewat proxy residensial. Memisahkan
+# ini penting karena kuota proxy residensial dijual per-GB, dan grid cuma 1
+# request per creator (bukan per URL) sementara B dan C jalan per URL.
+IG_GRID_PROXY = (os.environ.get('IG_GRID_PROXY', '') or IG_PUBLIC_PROXY).strip()
+
+# Grid kadang balas shell kosong walau dari IP sehat, biasanya sehabis burst.
+# Terukur: dengan jeda 3 detik, 20 dari 20 berisi; tanpa jeda sesudah burst,
+# sempat nol beruntun lalu pulih sendiri. Jadi kosong != pasti tidak ada.
+IG_GRID_RETRY = max(1, int(os.environ.get('IG_GRID_RETRY', '3')))
+IG_GRID_RETRY_DELAY = float(os.environ.get('IG_GRID_RETRY_DELAY', '2.0'))
+
 _PROXIES = {'http': IG_PUBLIC_PROXY, 'https': IG_PUBLIC_PROXY} if IG_PUBLIC_PROXY else None
+_GRID_PROXIES = {'http': IG_GRID_PROXY, 'https': IG_GRID_PROXY} if IG_GRID_PROXY else None
 
 # Cache grid per-username. Satu creator yang punya 12 klaim = 1 request, bukan 12.
 _GRID_CACHE = {}
@@ -171,14 +185,21 @@ def fetch_reels_grid(username, use_cache=True):
                 return hit[1]
 
     result = {}
-    try:
-        r = _get(f'https://www.instagram.com/{username}/reels/', NAV_HEADERS)
-        if r.status_code == 200:
-            for node in _parse_media_nodes(r.text):
-                if node['play_count'] is not None:
-                    result[node['code']] = node
-    except Exception:
-        result = {}
+    for attempt in range(IG_GRID_RETRY):
+        try:
+            r = requests.get(f'https://www.instagram.com/{username}/reels/',
+                             headers=NAV_HEADERS, proxies=_GRID_PROXIES,
+                             timeout=IG_PUBLIC_TIMEOUT)
+            if r.status_code == 200:
+                for node in _parse_media_nodes(r.text):
+                    if node['play_count'] is not None:
+                        result[node['code']] = node
+        except Exception:
+            result = {}
+        if result:
+            break
+        if attempt < IG_GRID_RETRY - 1:
+            time.sleep(IG_GRID_RETRY_DELAY)
 
     # Hasil kosong tetap di-cache (TTL pendek) supaya akun yang memang tergembok
     # tidak dihajar berulang kali dalam satu batch.
@@ -314,9 +335,14 @@ def get_instagram_public(url, known_username=None, want_meta=False):
 
     Balikan mengikuti bentuk yang sudah dipakai get_instagram_custom, ditambah
     metadata asal-usul angkanya:
-        views_exact  -- True kalau views dari play_count (eksak)
+        views_metric -- 'play_count' | 'ig_views'. WAJIB dilihat sebelum angka
+                        dipakai: dua-duanya bernama "views" tapi play_count
+                        kira-kira 1,9x lebih besar, jadi mencampurnya dalam satu
+                        kolom laporan bikin selisih bayaran hampir dua kali.
+        views_exact  -- True kalau angkanya tidak dibulatkan. INI SOAL PEMBULATAN,
+                        BUKAN soal metrik: meta views di bawah 10 ribu juga eksak.
         views_source -- 'grid' | 'meta' | None
-        meta_views   -- angka "views" versi tampilan IG (beda metrik dari play_count)
+        meta_views   -- angka "views" versi tampilan IG
     """
     shortcode = extract_shortcode(url)
     if not shortcode:
@@ -325,7 +351,8 @@ def get_instagram_public(url, known_username=None, want_meta=False):
     data = {
         'platform': 'Instagram', 'uploader': 'Unknown', 'title': 'Instagram Video',
         'views': 0, 'likes': 0, 'comments': 0, 'shares': 0,
-        'views_exact': False, 'views_source': None, 'meta_views': None,
+        'views_exact': False, 'views_source': None, 'views_metric': None,
+        'meta_views': None,
     }
 
     username = known_username
@@ -341,6 +368,7 @@ def get_instagram_public(url, known_username=None, want_meta=False):
         data['views'] = node['play_count'] or 0
         data['views_exact'] = True
         data['views_source'] = 'grid'
+        data['views_metric'] = 'play_count'
         if node['like_count'] is not None:
             data['likes'] = node['like_count']
         if node['comment_count'] is not None:
@@ -367,6 +395,7 @@ def get_instagram_public(url, known_username=None, want_meta=False):
         if not data['views_exact'] and mv:
             data['views'] = mv
             data['views_source'] = 'meta'
+            data['views_metric'] = 'ig_views'
             data['views_exact'] = not rounded
 
     if data['views'] or data['likes'] or data['comments']:
